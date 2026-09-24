@@ -2,9 +2,11 @@
 
 ## Dependencies and configuration
 
+The process supervisor requires the macOS `os.waitid` interface exposed by Python 3.13+. Older interpreters are rejected before any vendor process is started.
+
 Install and authenticate Cursor separately. The native executable version must match `cli-tree.json`; its `executable_checks` are applied before CLI calls and before adapter execution. The package does not install/update a vendor, perform interactive login, or copy credentials.
 
-Provide Python 3.11 or newer as `python3` on the environment PATH that launches Computer MCP. The packaged executable uses `#!/usr/bin/env python3`. A host dependency binding alone does not rewrite this interpreter lookup. A supported interpreter is required even when the vendor executable is explicitly bound.
+Provide Python 3.13 or newer as `python3` on the environment PATH that launches Computer MCP. The packaged executable uses `#!/usr/bin/env python3`. A host dependency binding alone does not rewrite this interpreter lookup. A supported interpreter is required even when the vendor executable is explicitly bound.
 
 Install the ZIP through Computer MCP's plugin UI or owner CLI. Installation is not activation or a permission grant. Use `plugins list/show` to obtain the current revision and installation identity. Review `Examples/settings.json`, replace its placeholder paths, then configure the plugin through the same UI or `plugins configure` command. The CLI dependency binding selects the vendor for the CLI contribution; the MCP launch `args` independently supply `--executable` for the adapter. These two choices should normally point to the same verified installation.
 
