@@ -1,0 +1,38 @@
+id = "cursor"
+name = "Cursor"
+version = "0.1.0"
+description = "Cursor Agent CLI automation plus an ACP-to-MCP adapter."
+
+[[dependencies]]
+id = "cursor-agent"
+commands = ["agent"]
+instructions = "Install and authenticate Cursor Agent separately. This plugin never installs, updates, logs in, or copies Cursor credentials."
+documentation = "https://cursor.com/docs/cli/overview"
+
+[[dependencies]]
+id = "python-runtime"
+commands = ["python3"]
+instructions = "Provide Python 3.11 or newer on the Computer MCP launch PATH. The plugin does not install Python."
+documentation = "https://www.python.org/downloads/"
+
+[[cli]]
+id = "agent"
+executable = { dependency = "cursor-agent" }
+description = "Verified non-interactive Cursor Agent CLI surface."
+tree = { kind = "file", path = "cli-tree.json" }
+
+[[mcp]]
+id = "acp"
+transport = "stdio"
+executable = { path = "bin/cursor-mcp-adapter" }
+prefix = "cursor"
+capabilities = ["tools"]
+
+[[skills]]
+id = "cursor-agent"
+path = "skills/cursor-agent"
+description = "Guidance for choosing Cursor CLI and ACP-backed tools safely."
+
+[compatibility]
+minimum_host = "1.2.2"
+architectures = ["arm64"]

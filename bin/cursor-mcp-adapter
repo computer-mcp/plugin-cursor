@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""Cursor ACP sessions exposed through the Computer MCP plugin's stdio server."""
+import sys
+if sys.version_info < (3, 11):
+    raise SystemExit("This plugin requires Python 3.11+ on the host launch PATH")
+
+import argparse
+import os
+import threading
+import time
+import uuid
+
+from plugin_runtime import (EventBuffer, Failure, Job, MCPServer, Process, Tool,
+    decoded, encoded, integer_schema, load_package, resolve_executable, schema,
+    text_schema, validate, verify_version)
+
+MANIFEST, TREE = load_package(__file__)
+VERSION = MANIFEST['version']
+POLICY = {'type':'string','enum':['reject-once','allow-once','allow-always','manual'],'default':'reject-once'}
+SESSION = text_schema(64)
+MODE = {'type':'string','enum':['agent','plan','ask']}
+OPEN_FIELDS = {'resume_session_id':text_schema(512),'mode':MODE,'permission_policy':POLICY,'timeout_seconds':integer_schema(1,60,45)}
+PROMPT_FIELDS = {'prompt':text_schema(),'timeout_seconds':integer_schema(1,1800,300),'max_events':integer_schema(1,256,128)}
+
+
+def permission_choice(params, policy):
+    options = params.get('options', [])
+    if not isinstance(options,list):
+        raise Failure('invalid_vendor_request','ACP permission options must be an array')
+    desired = policy.replace('-','_')
+    for kind in (desired, 'reject_once'):
+        for option in options:
+            if not isinstance(option,dict) or not isinstance(option.get('optionId'),str):
+                continue
+            if option.get('kind') == kind:
+                return {'outcome':{'outcome':'selected','optionId':option['optionId']}}
+    return {'outcome':{'outcome':'cancelled'}}
+
+
+def checked_response(method, params, response):
+    validate(response, schema({'outcome':{'type':'object'}}, ['outcome']))
+    outcome = response['outcome']
+    action = outcome.get('outcome')
+    if method == 'session/request_permission':
+        if action == 'cancelled':
+            validate(outcome,schema({'outcome':{'enum':['cancelled']}},['outcome']))
+        elif action == 'selected':
+            validate(outcome,schema({'outcome':{'enum':['selected']},'optionId':text_schema(512)},['outcome','optionId']))
+            offered = {x.get('optionId') for x in params.get('options',[]) if isinstance(x,dict)}
+            if outcome['optionId'] not in offered:
+                raise Failure('invalid_arguments','Permission option was not offered by this request')
+        else:
+            raise Failure('invalid_arguments','Permission outcome must be selected or cancelled')
+    elif method == 'cursor/create_plan':
+        fields = {'outcome':{'enum':['accepted','rejected','cancelled']}}
+        if action == 'accepted': fields['planUri'] = text_schema(4096)
+        if action == 'rejected': fields['reason'] = text_schema(1024,0)
+        validate(outcome,schema(fields,['outcome']))
+    elif method == 'cursor/ask_question':
+        fields = {'outcome':{'enum':['answered','skipped','cancelled']}}
+        required = ['outcome']
+        if action == 'skipped': fields['reason'] = text_schema(1024,0)
+        if action == 'answered':
+            fields['answers'] = {'type':'array','maxItems':128,'items':schema({'questionId':text_schema(256),'selectedOptionIds':{'type':'array','maxItems':128,'items':text_schema(256)}},['questionId','selectedOptionIds'])}
+            required.append('answers')
+        validate(outcome,schema(fields,required))
+        if action == 'answered':
+            questions = {q['id']:q for q in params.get('questions',[]) if isinstance(q,dict) and isinstance(q.get('id'),str)}
+            seen = set()
+            for answer in outcome['answers']:
+                qid, selected = answer['questionId'], answer['selectedOptionIds']
+                if qid not in questions or qid in seen or len(set(selected)) != len(selected):
+                    raise Failure('invalid_arguments','Question or answer identity is invalid')
+                question = questions[qid]
+                options = {x.get('id') for x in question.get('options',[]) if isinstance(x,dict)}
+                if set(selected)-options or (not question.get('allowMultiple',False) and len(selected)>1):
+                    raise Failure('invalid_arguments','Answer does not match the offered choices')
+                seen.add(qid)
+            if seen != questions.keys():
+                raise Failure('invalid_arguments','Provide answers for every pending question')
+    else:
+        raise Failure('unsupported_request','No response contract exists for this vendor request')
+    return response
+
+
+class Session:
+    def __init__(self, handle, executable, policy):
+        self.handle, self.executable, self.policy = handle, executable, policy
+        self.vendor_id = None
+        self.process = None
+        self.lock = threading.RLock()
+        self.operation = threading.Lock()
+        self.closed = threading.Event()
+        self.cancelled = threading.Event()
+        self.events = EventBuffer()
+        self.pending = {}
+        self.sequence = 0
+        self.busy = False
+        self.initialization = {}
+        self.session_info = {}
+        self.text = bytearray()
+        self.text_truncated = False
+        self.prompt_id = None
+        self.prompt_value = None
+        self.prompt_thread = None
+        self.prompt_done = threading.Event()
+    def info(self):
+        with self.lock:
+            return {'session':self.handle,'session_id':self.vendor_id,'closed':self.closed.is_set(),'busy':self.busy,'pending_requests':len(self.pending),'permission_policy':self.policy}
+    def open(self, args, job):
+        deadline = time.monotonic()+args.get('timeout_seconds',45)
+        verify_version(self.executable,TREE,job,os.getcwd())
+        job.check()
+        self.process = Process([self.executable,'acp'],os.getcwd())
+        if self.closed.is_set():
+            self.process.close()
+            raise Failure('cancelled','Session was closed during startup')
+        self.initialization = self.request('initialize',{'protocolVersion':1,'clientCapabilities':{'fs':{'readTextFile':False,'writeTextFile':False},'terminal':False},'clientInfo':{'name':'computer-mcp-cursor-adapter','version':VERSION}},deadline,job)
+        if self.initialization.get('protocolVersion') != 1:
+            raise Failure('unsupported_protocol','Cursor did not negotiate ACP protocol 1')
+        methods = self.initialization.get('authMethods',[])
+        if not any(isinstance(x,dict) and x.get('id')=='cursor_login' for x in methods):
+            raise Failure('unsupported_authentication','Cursor did not advertise cursor_login')
+        self.request('authenticate',{'methodId':'cursor_login'},deadline,job)
+        params = {'cwd':os.getcwd(),'mcpServers':[]}
+        if args.get('resume_session_id'):
+            if self.initialization.get('agentCapabilities',{}).get('loadSession') is not True:
+                raise Failure('unsupported_operation','This Cursor runtime does not advertise session/load')
+            self.vendor_id = args['resume_session_id']
+            params['sessionId'] = self.vendor_id
+            self.session_info = self.request('session/load',params,deadline,job)
+        else:
+            self.session_info = self.request('session/new',params,deadline,job)
+            self.vendor_id = self.session_info.get('sessionId')
+        if not isinstance(self.vendor_id,str) or not self.vendor_id:
+            raise Failure('invalid_vendor_response','Cursor returned no sessionId')
+        if args.get('mode'):
+            self.set_mode(args['mode'],deadline,job)
+        return {**self.info(),'agent_capabilities':self.initialization.get('agentCapabilities',{}),'session_info':self.session_info}
+    def respond_raw(self, request_id, result=None, error=None):
+        reply = {'jsonrpc':'2.0','id':request_id}
+        reply['error' if error is not None else 'result'] = error if error is not None else result
+        self.process.send(reply,time.monotonic()+2)
+    def vendor_request(self, message, deadline):
+        method, params = message['method'], message.get('params',{})
+        if not isinstance(params,dict) or len(encoded(params))>32768:
+            self.respond_raw(message['id'],error={'code':-32602,'message':'Request parameters exceed the adapter contract'})
+            return
+        if method == 'session/request_permission' and self.policy != 'manual':
+            response = permission_choice(params,self.policy)
+            self.respond_raw(message['id'],response)
+            self.events.append({'method':method,'params':params,'response':response})
+        elif method in ('session/request_permission','cursor/ask_question','cursor/create_plan'):
+            with self.lock:
+                if len(self.pending)>=8:
+                    self.respond_raw(message['id'],{'outcome':{'outcome':'cancelled'}})
+                    return
+                token = uuid.uuid4().hex
+                self.pending[token] = {'id':message['id'],'method':method,'params':params,'deadline':deadline}
+            self.events.append({'method':method,'request_id':token,'params':params})
+        else:
+            self.respond_raw(message['id'],error={'code':-32601,'message':'Unsupported ACP client request'})
+    def request(self, method, params, deadline, job):
+        if not self.operation.acquire(blocking=False):
+            raise Failure('busy','Another request owns this Cursor session')
+        try:
+            if self.closed.is_set():
+                raise Failure('session_closed','Cursor session is closed')
+            self.sequence += 1
+            request_id = self.sequence
+            self.process.send({'jsonrpc':'2.0','id':request_id,'method':method,'params':params},deadline,job)
+            cancellation_sent = False
+            while True:
+                if self.closed.is_set():
+                    raise Failure('session_closed','Cursor session is closed')
+                cancel = job.cancelled.is_set() or (method=='session/prompt' and self.cancelled.is_set())
+                if cancel and not cancellation_sent:
+                    if method != 'session/prompt':
+                        raise Failure('cancelled','Cursor operation cancelled')
+                    self.process.send({'jsonrpc':'2.0','method':'session/cancel','params':{'sessionId':self.vendor_id}},min(deadline,time.monotonic()+1))
+                    cancellation_sent = True
+                    deadline = min(deadline,time.monotonic()+2)
+                    self.cancel_pending()
+                try:
+                    raw = self.process.read(min(deadline,time.monotonic()+.1))
+                except Failure as error:
+                    if error.code=='timeout' and time.monotonic()<deadline:
+                        continue
+                    if cancellation_sent:
+                        raise Failure('cancelled','Cursor cancellation did not settle; session closed') from error
+                    raise
+                if raw is None:
+                    raise Failure('connection_closed','Cursor closed the ACP connection')
+                try: message = decoded(raw)
+                except (ValueError,UnicodeError,RecursionError) as error:
+                    raise Failure('invalid_vendor_response','Cursor emitted invalid ACP JSON') from error
+                if not isinstance(message,dict) or message.get('jsonrpc')!='2.0':
+                    raise Failure('invalid_vendor_response','Cursor emitted an invalid ACP envelope')
+                if message.get('id')==request_id and type(message.get('id')) is int and ('result' in message or 'error' in message):
+                    if cancellation_sent:
+                        # The matching response consumes the outstanding RPC; this session can be reused.
+                        return {'stopReason':'cancelled','cancelled':True}
+                    if 'error' in message:
+                        error = message['error']
+                        code = error.get('code') if isinstance(error,dict) else None
+                        raise Failure('vendor_error',f'Cursor rejected {method} (RPC code {code}); no request was replayed')
+                    value = message['result']
+                    if not isinstance(value,dict):
+                        raise Failure('invalid_vendor_response','ACP result must be an object')
+                    return value
+                if 'id' in message and isinstance(message.get('method'),str):
+                    self.vendor_request(message,deadline)
+                elif isinstance(message.get('method'),str):
+                    self.events.append(message)
+                    update = message.get('params',{}).get('update',{}) if isinstance(message.get('params',{}),dict) else {}
+                    if isinstance(update,dict) and update.get('sessionUpdate')=='agent_message_chunk':
+                        content = update.get('content',{})
+                        if isinstance(content,dict) and isinstance(content.get('text'),str):
+                            raw_text = content['text'].encode()
+                            capacity = 131072-len(self.text)
+                            self.text.extend(raw_text[:capacity])
+                            self.text_truncated |= len(raw_text)>capacity
+                else:
+                    raise Failure('invalid_vendor_response','Unexpected ACP response identity')
+        except Exception:
+            self.close()
+            raise
+        finally:
+            self.operation.release()
+    def set_mode(self, mode, deadline, job):
+        available = self.session_info.get('modes',{}).get('availableModes',[])
+        if not any(isinstance(x,dict) and x.get('id')==mode for x in available):
+            raise Failure('unsupported_mode','Mode is not advertised by this Cursor session')
+        return self.request('session/set_mode',{'sessionId':self.vendor_id,'modeId':mode},deadline,job)
+    def prompt(self, args, job, reserved=False):
+        with self.lock:
+            if self.busy and not reserved:
+                raise Failure('busy','A prompt is already active in this session')
+            self.busy = True
+            if not reserved:
+                self.cancelled.clear()
+            self.text = bytearray()
+            self.text_truncated = False
+            before = self.events.cursor
+        try:
+            result = self.request('session/prompt',{'sessionId':self.vendor_id,'prompt':[{'type':'text','text':args['prompt']}]},time.monotonic()+args.get('timeout_seconds',300),job)
+            if not isinstance(result.get('stopReason'), str) or not result['stopReason']:
+                self.close()
+                raise Failure('invalid_vendor_response', 'Cursor prompt result lacks a stop reason')
+            if len(encoded(result)) > 131072:
+                self.close()
+                raise Failure('result_too_large', 'Cursor prompt result exceeds its byte bound')
+            page = self.events.page(before,args.get('max_events',128))
+            return {**self.info(),'busy':False,'stop_reason':result.get('stopReason'),'text':self.text.decode('utf-8',errors='ignore'),'text_truncated':self.text_truncated,'events':[row['event'] for row in page['events']],'event_page':{k:v for k,v in page.items() if k!='events'},'events_truncated':page['has_more'] or page['missed_events'] or any(row['event'].get('omitted',False) for row in page['events']),'native_result':result,'is_error':bool(result.get('cancelled',False)) or result['stopReason']=='cancelled'}
+        finally:
+            self.cancel_pending()
+            with self.lock: self.busy = False
+    def start_prompt(self, args, job):
+        job.check()
+        with self.lock:
+            if self.busy or self.closed.is_set() or (self.prompt_thread and self.prompt_thread.is_alive()):
+                raise Failure('busy','Session cannot admit another prompt')
+            self.busy = True
+            self.cancelled.clear()
+            self.prompt_id = uuid.uuid4().hex
+            self.prompt_value = None
+            self.prompt_done.clear()
+            self.prompt_thread = threading.Thread(target=self.background_prompt,args=(dict(args),))
+            self.prompt_thread.start()
+            return {'session':self.handle,'prompt_id':self.prompt_id,'completed':False}
+    def background_prompt(self, args):
+        try:
+            value = self.prompt(args,Job(),reserved=True)
+        except Failure as error:
+            value = {'is_error':True,'error':{'code':error.code,'message':str(error)}}
+        except Exception:
+            value = {'is_error':True,'error':{'code':'internal_error','message':'Cursor prompt failed without automatic replay'}}
+        with self.lock:
+            self.prompt_value = value
+            self.prompt_done.set()
+    def prompt_result(self, prompt_id):
+        with self.lock:
+            if prompt_id != self.prompt_id:
+                raise Failure('unknown_prompt','Only the most recent background prompt is retained in this session')
+            if not self.prompt_done.is_set():
+                return {'session':self.handle,'prompt_id':prompt_id,'completed':False}
+            return {**self.prompt_value,'prompt_id':prompt_id,'completed':True}
+    def cancel_pending(self):
+        with self.lock:
+            pending, self.pending = list(self.pending.values()), {}
+        for item in pending:
+            try: self.respond_raw(item['id'],{'outcome':{'outcome':'cancelled'}})
+            except (Failure,ValueError): pass
+    def answer(self, token, response):
+        with self.lock:
+            item = self.pending.get(token)
+            if item is None or item['deadline']<=time.monotonic() or self.closed.is_set():
+                raise Failure('stale_request','Interactive request no longer belongs to an active operation')
+            checked_response(item['method'],item['params'],response)
+            del self.pending[token]
+        try:
+            self.respond_raw(item['id'],response)
+        except Exception:
+            self.close()
+            raise Failure('response_unknown','Interactive response delivery failed; do not replay it')
+        self.events.append({'method':'adapter/response','request_id':token,'response':response})
+        return {'answered':True,'request_id':token}
+    def close(self):
+        self.closed.set()
+        with self.lock: self.pending.clear()
+        if self.process is not None:
+            self.process.close()
+        if self.prompt_thread and self.prompt_thread is not threading.current_thread():
+            self.prompt_thread.join(timeout=4)
+
+
+class Cursor:
+    def __init__(self, executable):
+        self.executable = executable
+        self.sessions = {}
+        self.lock = threading.RLock()
+        self.stopping = False
+    def open(self,args,job):
+        executable = resolve_executable(self.executable,'CURSOR_AGENT_EXECUTABLE','agent')
+        session = Session(uuid.uuid4().hex,executable,args.get('permission_policy','reject-once'))
+        with self.lock:
+            self.sessions = {k:v for k,v in self.sessions.items() if not v.closed.is_set()}
+            if self.stopping or len(self.sessions)>=8:
+                raise Failure('capacity','Cursor session capacity reached or adapter is shutting down')
+            self.sessions[session.handle] = session
+        try:
+            return session.open(args,job)
+        except Exception:
+            session.close()
+            with self.lock: self.sessions.pop(session.handle,None)
+            raise
+    def get(self,handle):
+        with self.lock: session = self.sessions.get(handle)
+        if session is None:
+            raise Failure('unknown_session','No session with this handle belongs to this adapter connection')
+        return session
+    def close(self,args,_job):
+        with self.lock: session = self.sessions.pop(args['session'],None)
+        if session: session.close()
+        return {'closed':True,'already_closed':session is None}
+    def once(self,args,job):
+        setup = {k:v for k,v in args.items() if k in OPEN_FIELDS}
+        setup['timeout_seconds'] = min(args.get('timeout_seconds',300),60)
+        opened = self.open(setup,job)
+        try:
+            value = self.get(opened['session']).prompt(args,job)
+        finally:
+            self.close({'session':opened['session']},job)
+        return {**value,'closed':True}
+    def prompt(self,args,job):
+        return self.get(args['session']).prompt(args,job)
+    def start_prompt(self,args,job):
+        return self.get(args['session']).start_prompt(args,job)
+    def prompt_result(self,args,_job):
+        return self.get(args['session']).prompt_result(args['prompt_id'])
+    def cancel(self,args,_job):
+        session = self.get(args['session'])
+        with session.lock:
+            active = session.busy
+            if active: session.cancelled.set()
+        return {'cancel_requested':active,'session':session.handle}
+    def pending(self,args,_job):
+        session = self.get(args['session'])
+        with session.lock:
+            return {'requests':[{'request_id':key,'method':value['method'],'params':value['params']} for key,value in session.pending.items()]}
+    def answer(self,args,_job):
+        return self.get(args['session']).answer(args['request_id'],args['response'])
+    def events(self,args,_job):
+        return self.get(args['session']).events.page(args.get('after_cursor',0),args.get('limit',128),args.get('max_bytes',196608))
+    def listing(self,_args,_job):
+        with self.lock: sessions = list(self.sessions.values())
+        return {'sessions':[s.info() for s in sessions]}
+    def mode(self,args,job):
+        session = self.get(args['session'])
+        return session.set_mode(args['mode'],time.monotonic()+15,job)
+    def shutdown(self):
+        with self.lock:
+            self.stopping = True
+            sessions, self.sessions = list(self.sessions.values()), {}
+        errors = []
+        for session in sessions:
+            try:
+                session.close()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise Failure('cleanup_unconfirmed', 'One or more Cursor sessions could not confirm cleanup')
+    def tools(self):
+        return [
+            Tool('cursor.acp.prompt','Run one Cursor ACP prompt and retire its owned process. Use explicit sessions for interactive input.',schema({**OPEN_FIELDS,**PROMPT_FIELDS},['prompt']),self.once),
+            Tool('cursor.acp.session.open','Initialize Cursor ACP, authenticate existing vendor credentials, and create or load a session in the host-selected working directory.',schema(OPEN_FIELDS),self.open),
+            Tool('cursor.acp.session.prompt','Prompt an existing Cursor ACP session; read events and answer pending requests concurrently.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.prompt),
+            Tool('cursor.acp.session.prompt.start','Start a prompt without holding a long MCP request; use its prompt ID to read completion.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.start_prompt),
+            Tool('cursor.acp.session.prompt.result','Read the most recent background prompt result without replaying it.',schema({'session':SESSION,'prompt_id':text_schema(64)},['session','prompt_id']),self.prompt_result),
+            Tool('cursor.acp.session.list','List only this adapter connection\'s Cursor sessions.',schema({}),self.listing),
+            Tool('cursor.acp.session.mode','Select a mode advertised by the current Cursor session.',schema({'session':SESSION,'mode':MODE},['session','mode']),self.mode),
+            Tool('cursor.acp.session.cancel','Request native ACP prompt cancellation without guessing a permission response.',schema({'session':SESSION},['session']),self.cancel),
+            Tool('cursor.acp.session.close','Close this Cursor session and retire its process group.',schema({'session':SESSION},['session']),self.close),
+            Tool('cursor.acp.events.read','Read byte-bounded Cursor events using a session-local cursor.',schema({'session':SESSION,'after_cursor':integer_schema(0,2**53-1,0),'limit':integer_schema(1,256,128),'max_bytes':integer_schema(1024,196608,196608)},['session']),self.events),
+            Tool('cursor.acp.requests.list','Read pending Cursor permission, question and plan requests; this does not approve them.',schema({'session':SESSION},['session']),self.pending),
+            Tool('cursor.acp.requests.respond','Respond once to an exact pending vendor request using its native outcome schema.',schema({'session':SESSION,'request_id':text_schema(64),'response':{'type':'object'}},['session','request_id','response']),self.answer),
+        ]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version',action='version',version=VERSION)
+    parser.add_argument('--executable',help='Absolute user-owned Cursor Agent path; otherwise CURSOR_AGENT_EXECUTABLE or PATH')
+    args = parser.parse_args()
+    cursor = Cursor(args.executable)
+    MCPServer('cursor-mcp-adapter',VERSION,cursor.tools(),cursor.shutdown).serve()
+
+
+if __name__=='__main__': main()

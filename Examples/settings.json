@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "dependencyExecutables": {
+    "cursor-agent": "/absolute/path/to/agent"
+  },
+  "mcp": {
+    "acp": {
+      "enabled": true,
+      "hostServices": false,
+      "args": [
+        "--executable",
+        "/absolute/path/to/agent"
+      ],
+      "exposure": "reexport",
+      "prefix": "",
+      "allowAnyTool": true
+    }
+  },
+  "cli": {
+    "agent": {
+      "enabled": true,
+      "allowAnyArgs": false
+    }
+  }
+}
