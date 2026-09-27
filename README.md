@@ -8,6 +8,12 @@ The CLI contribution describes verified non-interactive commands. The native bas
 
 The adapter provides ACP session open/load, repeated prompts, background prompt start/result, session listing/mode/cancel/close, cursor-paginated events and explicit responses to permission/question/plan requests. `cursor.acp.prompt` remains the one-shot convenience path. Twelve tools are discovered through MCP; discovery does not start a vendor process.
 
+The ordinary MCP work resource reports connection-owned sessions through confirmed
+cleanup, including idle sessions, background prompts and interactive requests.
+Hosts that support this resource can account for work after a tool reply. It
+requires no private Host Services permission and does not itself enable host
+configuration changes.
+
 `permission_policy` defaults to `reject-once`. `allow-once` and `allow-always` are explicit native decisions and only select offered options. `manual` exposes pending permission requests for an explicit response. Questions and plans always require an explicit response; no answer is invented. Use `session.open` plus `session.prompt.start` for these workflows.
 
 ## Use and verify

@@ -108,7 +108,7 @@ enabled = []
 '''
 
 
-def validate(host, archive, output):
+def validate(host, archive, output, require_work_ownership=False):
     host = host.resolve(strict=True)
     archive = archive.resolve(strict=True)
     output.mkdir(parents=True, exist_ok=False)
@@ -166,6 +166,18 @@ def validate(host, archive, output):
             native_names = [tool['name'] for tool in catalog if tool['name'].startswith(vendor + '.')]
             require(len(native_names) == (12 if vendor == 'cursor' else 6), 'Adapter catalog missing required tools')
             checks['catalog'] = {'status':'passed', 'cli_tools':len(projected), 'mcp_tools':len(native_names)}
+            if require_work_ownership:
+                require(vendor == 'cursor', 'Work ownership acceptance requires the Cursor session contract')
+                require(all('io.github.computer-mcp/work' not in tool.get('_meta',{}) for tool in catalog),
+                        'Gateway exports advertise a downstream-only work resource')
+            def work_status(count):
+                def observe():
+                    servers = checked(client,'mcp.servers.status',{'server':'fixture-adapter'})['servers']
+                    value = servers[0]['connection'].get('provider_work')
+                    require(isinstance(value,dict), 'Candidate host does not expose provider-work observation')
+                    return value
+                return wait_for(observe, lambda value:value['resource_count']==count
+                                and value['unsettled_invocation_count']==0 and not value['observation_pending'])
             prompt = "--leading 'quotes' 中文\nnot-a-shell-command"
             arguments = {'prompt': prompt}
             if vendor == 'claude':
@@ -187,15 +199,23 @@ def validate(host, archive, output):
 
             if vendor == 'cursor':
                 session = checked(client, 'cursor.acp.session.open', {'permission_policy':'manual'})['session']
+                work_evidence = {'opened':work_status(1)} if require_work_ownership else None
                 run = checked(client, 'cursor.acp.session.prompt.start', {'session':session,'prompt':'permission'})['prompt_id']
                 pending = wait_for(lambda: checked(client, 'cursor.acp.requests.list', {'session':session}), lambda v: bool(v['requests']))['requests'][0]
+                if work_evidence is not None: work_evidence['waiting_for_input'] = work_status(1)
                 checked(client, 'cursor.acp.requests.respond', {'session':session,'request_id':pending['request_id'],
                                                               'response':{'outcome':{'outcome':'selected','optionId':'opaque-no'}}})
                 completed = wait_for(lambda: checked(client, 'cursor.acp.session.prompt.result', {'session':session,'prompt_id':run}), lambda v:v.get('completed'))
                 require(not completed.get('is_error'), 'Background ACP fixture failed')
+                if work_evidence is not None: work_evidence['idle_session'] = work_status(1)
                 checked(client, 'cursor.acp.events.read', {'session':session,'max_bytes':2048})
                 checked(client, 'cursor.acp.session.close', {'session':session})
                 require(not checked(client, 'cursor.acp.session.list')['sessions'], 'Closed ACP session remains live')
+                if work_evidence is not None:
+                    work_evidence['released'] = work_status(0)
+                    require(len({state['instance_id'] for state in work_evidence.values()})==1,
+                            'Provider connection changed during session ownership acceptance')
+                    checks['provider_work'] = work_evidence
             else:
                 run = checked(client, 'claude.run.start', {'prompt':'hello','permission_mode':'plan'})['run_id']
                 completed = wait_for(lambda: checked(client, 'claude.run.result', {'run_id':run}), lambda v:v.get('completed'))
@@ -252,8 +272,10 @@ def main():
     parser.add_argument('--host', required=True, type=Path)
     parser.add_argument('--archive', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--require-work-ownership', action='store_true',
+                        help='Require a candidate host to observe session ownership through final release')
     args = parser.parse_args()
-    validate(args.host, args.archive, args.output)
+    validate(args.host, args.archive, args.output, args.require_work_ownership)
 
 
 if __name__ == '__main__':

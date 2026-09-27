@@ -39,6 +39,14 @@ python3 Scripts/validate_host.py \
 
 Replace `PLUGIN.zip` with the package's actual archive name. This uses a temporary directory and the installed host's archive worker and standalone MCP entrypoint. It does not connect to the production App's control socket or database. Vendor tool execution is replaced with inert fixtures; the native version/help check is a separate command. A new evidence directory is required to avoid overwriting an earlier run.
 
+For a candidate host implementing the provider-work contract, add
+`--require-work-ownership`. This gate verifies the same connection retains an
+opened session, a detached prompt waiting for input and an idle session, then
+observes no owners after confirmed session close. It also checks that the
+gateway does not reexport the downstream-only resource declaration. Hosts
+without this observation surface can still run the ordinary interoperability
+gate without that option.
+
 A real ACP handshake can be checked independently, without authenticating, opening a conversation or invoking a model:
 
 ```sh

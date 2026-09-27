@@ -21,6 +21,41 @@ hints rather than permissions.
 Session open/load, mode changes and interactive responses also declare
 `full-shell`; they can initialize native tools or continue executable work.
 
+## Runtime work resource
+
+The adapter advertises ordinary MCP resources and the version-1 declaration in
+`_meta["io.github.computer-mcp/work"]` on its tool definitions. `resources/list`
+lists `computer-mcp://runtime/work/v1`; `resources/read` returns one JSON text
+content entry. The report has `format_version`, a connection-local UUID
+`instance_id`, a nonnegative exact integer `revision`, and the complete
+`resources` array. Unchanged resource sets keep their revision; changed sets
+advance it. At most 1,024 resources and 512 KiB of report text are allowed.
+
+Each live resource has kind `cursor.session`, the adapter `session` handle as
+`id`, the opening call's host-supplied
+`_meta["io.github.computer-mcp/work-invocation"]` UUID as `acquired_by`, and
+state `active` or `uncertain`. This reference binds lifecycle observation; it
+grants no authority and is not a native session ID. It is never read from tool
+arguments or forwarded to the vendor process.
+
+A session is owned from pending startup through idle periods, repeated or
+background prompts and interactive requests. Completing a prompt does not close
+its session. Removal requires confirmed process cleanup, settled startup and
+completion of the owned background thread. Closing with unconfirmed cleanup
+reports `uncertain` and keeps the session against capacity. A one-shot prompt
+releases its session after the same cleanup boundary. No report can substitute
+for permission, native execution success or authenticated model evidence.
+
+Ordinary clients may continue to call tools without work-invocation metadata.
+If such a client creates a live session, the work resource returns unavailable
+evidence until unbound work is released; it never reports a falsely empty
+snapshot. Malformed invocation metadata is rejected before execution. Report
+reads do not launch a vendor, terminate a session, change permissions or replay
+work. The adapter does not require resource subscriptions; hosts may poll.
+
+See the host's [provider work contract](https://github.com/computer-mcp/computer-mcp/blob/master/Documentation/Reference/MCPProtocol.md#downstream-provider-work)
+for acquisition expiry, snapshot validation and host-side uncertainty.
+
 ## Tools
 
 | Native MCP tool | Behavior |

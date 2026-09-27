@@ -27,7 +27,7 @@ id = "acp"
 transport = "stdio"
 executable = { path = "bin/cursor-mcp-adapter" }
 prefix = "cursor"
-capabilities = ["tools"]
+capabilities = ["tools", "resources"]
 
 [[skills]]
 id = "cursor-agent"

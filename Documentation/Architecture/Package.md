@@ -6,6 +6,13 @@ The package is independently maintained and distributed. Computer MCP owns regis
 
 `bin/cursor-mcp-adapter` owns native sessions, one active operation per session, bounded events and pending permission/question/plan responses. `bin/plugin_runtime.py` is a package-private standard-library implementation of bounded MCP framing/validation, process ownership and retention; it is distributed with this plugin, not installed into or imported from Computer MCP. Each package can update independently. Python 3.13+ is a runtime dependency selected by the launch PATH.
 
+The standard MCP work resource projects these same session owners. The adapter
+binds each session to its creation request's host correlation and supplies live
+or uncertain state; the MCP server bounds and versions complete snapshots.
+Background threads and unconfirmed cleanup remain owned even after the creating
+tool returns. Host configuration generations and continuation routing remain
+host responsibilities. The resource does not introduce another task lifecycle.
+
 The supervisor lifeline and cleanup receipt are private implementation channels, not plugin-host protocol extensions. Vendor subprocesses inherit neither channel nor host private descriptors. Explicit cleanup acknowledgement is separate from exit status. Runtime errors do not authorize retries or privilege escalation.
 
 Scripts provide deterministic packaging, non-model native interface checks and isolated unchanged-host integration checks. Tests exercise deterministic peers and lifecycle failures. The distribution excludes build/test/evidence files. No full native GUI, Windows backend or hosted API is claimed by this package.
