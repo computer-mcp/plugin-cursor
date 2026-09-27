@@ -23,6 +23,7 @@ MAX_RESULT = 196_608
 SUPPORTED_MCP = ('2024-11-05', '2025-03-26', '2025-06-18')
 WORK_URI = 'computer-mcp://runtime/work/v1'
 WORK_METADATA = 'io.github.computer-mcp/work'
+CONTINUATION_METADATA = 'io.github.computer-mcp/continuation'
 WORK_INVOCATION = 'io.github.computer-mcp/work-invocation'
 
 
@@ -483,13 +484,29 @@ class Tool:
     input_schema: dict
     handler: object
     risk: str
+    continuation: tuple[str,str] | None = None
     def __post_init__(self):
         if self.risk not in {'read-only','workspace-write','external-write','destructive','full-shell'}:
             raise ValueError('Every tool requires a known publisher risk classification')
+        if self.continuation is not None:
+            kind, argument = self.continuation
+            if (not isinstance(kind,str) or not kind or len(kind.encode('utf-8'))>1024
+                    or any(ord(c)<32 or 127<=ord(c)<=159 for c in kind)
+                    or not isinstance(argument,str) or not argument
+                    or len(('/'+argument.replace('~','~0').replace('/','~1')).encode('utf-8'))>1024
+                    or any(ord(c)<32 or 127<=ord(c)<=159 for c in argument)
+                    or argument not in self.input_schema.get('required',[])
+                    or self.input_schema.get('properties',{}).get(argument,{}).get('type') not in {'string','integer'}):
+                raise ValueError('Continuation requires a resource kind and required scalar handle')
     def definition(self):
         read_only = self.risk == 'read-only'
+        metadata = {'io.github.computer-mcp/risk':self.risk}
+        if self.continuation is not None:
+            kind, argument = self.continuation
+            pointer = '/' + argument.replace('~','~0').replace('/','~1')
+            metadata[CONTINUATION_METADATA] = {'format_version':1,'selectors':[{'kind':kind,'handles':{'id':pointer}}]}
         return {'name':self.name,'description':self.description,'inputSchema':self.input_schema,
-                '_meta':{'io.github.computer-mcp/risk':self.risk},
+                '_meta':metadata,
                 'annotations':{'readOnlyHint':read_only,'destructiveHint':self.risk in {'destructive','full-shell'},
                                'idempotentHint':read_only,'openWorldHint':not read_only}}
 

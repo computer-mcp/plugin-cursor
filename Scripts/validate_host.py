@@ -168,8 +168,9 @@ def validate(host, archive, output, require_work_ownership=False):
             checks['catalog'] = {'status':'passed', 'cli_tools':len(projected), 'mcp_tools':len(native_names)}
             if require_work_ownership:
                 require(vendor == 'cursor', 'Work ownership acceptance requires the Cursor session contract')
-                require(all('io.github.computer-mcp/work' not in tool.get('_meta',{}) for tool in catalog),
-                        'Gateway exports advertise a downstream-only work resource')
+                require(all(key not in tool.get('_meta',{}) for tool in catalog
+                            for key in ('io.github.computer-mcp/work','io.github.computer-mcp/continuation')),
+                        'Gateway exports advertise downstream-only ownership metadata')
             def work_status(count):
                 def observe():
                     servers = checked(client,'mcp.servers.status',{'server':'fixture-adapter'})['servers']

@@ -106,3 +106,16 @@ Representative errors include invalid_arguments, unknown_session, busy, incompat
 - The installed native `agent --help`, `agent --version` and `agent acp --help` used to maintain the pinned CLI tree.
 
 Vendor protocol observations, fixture tests, host interoperability and authenticated backend execution are separate evidence classes.
+
+## Continuation binding
+
+Tools that accept an existing adapter handle declare
+`_meta["io.github.computer-mcp/continuation"]` with format version 1. The selector
+matches kind `cursor.session` and primary resource `id` against argument
+`session` using JSON Pointer `/session`. This identifies the actual
+connection-owned lifetime; it does not rebind acquisition or grant permissions.
+New work and unscoped listings do not claim an existing owner. The declaration
+uses ordinary MCP metadata and requires no private Host Services. Hosts validate
+and retain it on its originating connection; gateway reexports strip it. Runtime
+generation selection remains host-owned, and this declaration alone does not
+enable live configuration changes.

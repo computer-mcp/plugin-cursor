@@ -9,7 +9,7 @@ import uuid
 from unittest.mock import Mock, patch
 from support import Client
 from test_completion import adapter
-from plugin_runtime import Failure, Job, MCPServer, Process, WORK_INVOCATION, WORK_METADATA, WORK_URI
+from plugin_runtime import CONTINUATION_METADATA, Failure, Job, MCPServer, Process, WORK_INVOCATION, WORK_METADATA, WORK_URI
 
 
 class WorkResourceTests(unittest.TestCase):
@@ -36,6 +36,18 @@ class WorkResourceTests(unittest.TestCase):
                 for definition in definitions:
                     self.assertEqual(definition['_meta'][WORK_METADATA],{'format_version':1,'uri':WORK_URI})
                     self.assertIn('io.github.computer-mcp/risk',definition['_meta'])
+                continuations = {
+                    'cursor.acp.session.prompt','cursor.acp.session.prompt.start',
+                    'cursor.acp.session.prompt.result','cursor.acp.session.mode',
+                    'cursor.acp.session.cancel','cursor.acp.session.close',
+                    'cursor.acp.events.read','cursor.acp.requests.list','cursor.acp.requests.respond',
+                }
+                declared = {tool['name']:tool['_meta'][CONTINUATION_METADATA]
+                            for tool in definitions if CONTINUATION_METADATA in tool['_meta']}
+                self.assertEqual(set(declared),continuations)
+                for selector in declared.values():
+                    self.assertEqual(selector,{'format_version':1,'selectors':[
+                        {'kind':'cursor.session','handles':{'id':'/session'}}]})
                 self.assertEqual(client.request('resources/list')['result']['resources'][0]['uri'],WORK_URI)
                 initial = self.snapshot(client)
                 self.assertEqual(initial['resources'],[])
