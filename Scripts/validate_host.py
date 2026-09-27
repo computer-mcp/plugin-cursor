@@ -216,6 +216,26 @@ def validate(host, archive, output):
         finally:
             client.close()
         checks['read_only_profile'] = 'passed'
+        restricted = configuration(package, workspace, cli_fixture, ROOT / 'Tests/Fixtures/vendor.py', vendor)
+        restricted = restricted.replace('mode = "local-full-access"', 'mode = "workspace-operations"')
+        restricted = restricted.replace('full_shell_enabled = true', 'full_shell_enabled = false')
+        execution_tool = 'cursor.acp.prompt' if vendor == 'cursor' else 'claude.run'
+        # An explicit low host risk must not bypass the publisher's execution floor.
+        restricted += '\n[mcp.servers.tool_risks]\n' + json.dumps(execution_tool) + ' = "read-only"\n'
+        config.write_text(restricted)
+        client = Client(str(workspace), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
+        try:
+            tools = client.request('tools/list')['result']['tools']
+            require(execution_tool not in {tool['name'] for tool in tools}, 'Restricted profile exposed arbitrary vendor execution')
+            inspection = 'cursor.acp.session.list' if vendor == 'cursor' else 'claude.run.list'
+            checked(client, inspection)
+            for name, arguments in [(execution_tool, {'prompt':'must-not-execute'}),
+                                    ('mcp.tools.call', {'server':'fixture-adapter','tool':execution_tool,'arguments':{'prompt':'must-not-execute'}})]:
+                denied = client.call(name, arguments)
+                require('error' in denied or denied['result'].get('isError'), 'Restricted profile admitted vendor execution')
+        finally:
+            client.close()
+        checks['publisher_floor_under_restricted_profile'] = 'passed'
     require(digest(host) == host_hash and digest(archive) == archive_hash, 'Host or archive changed during acceptance')
     report = {'status':'passed', 'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
               'plugin_id':vendor, 'plugin_version':manifest['version'], 'host_version':version,

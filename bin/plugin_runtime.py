@@ -468,8 +468,16 @@ class Tool:
     description: str
     input_schema: dict
     handler: object
+    risk: str
+    def __post_init__(self):
+        if self.risk not in {'read-only','workspace-write','external-write','destructive','full-shell'}:
+            raise ValueError('Every tool requires a known publisher risk classification')
     def definition(self):
-        return {'name':self.name,'description':self.description,'inputSchema':self.input_schema}
+        read_only = self.risk == 'read-only'
+        return {'name':self.name,'description':self.description,'inputSchema':self.input_schema,
+                '_meta':{'io.github.computer-mcp/risk':self.risk},
+                'annotations':{'readOnlyHint':read_only,'destructiveHint':self.risk in {'destructive','full-shell'},
+                               'idempotentHint':read_only,'openWorldHint':not read_only}}
 
 
 class MCPServer:

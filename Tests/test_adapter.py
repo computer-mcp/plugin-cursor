@@ -14,6 +14,14 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(response['result']['isError'],response)
         return Client.value(response)
     def open(self,**args):return self.value(self.call('session.open',args))['session']
+    def test_catalog_declares_execution_and_inspection_risk(self):
+        expected = {'cursor.acp.prompt': 'full-shell', 'cursor.acp.session.open': 'full-shell', 'cursor.acp.session.prompt': 'full-shell', 'cursor.acp.session.prompt.start': 'full-shell', 'cursor.acp.session.prompt.result': 'read-only', 'cursor.acp.session.list': 'read-only', 'cursor.acp.session.mode': 'full-shell', 'cursor.acp.session.cancel': 'destructive', 'cursor.acp.session.close': 'destructive', 'cursor.acp.events.read': 'read-only', 'cursor.acp.requests.list': 'read-only', 'cursor.acp.requests.respond': 'full-shell'}
+        tools = self.client.request('tools/list')['result']['tools']
+        self.assertEqual({tool['name']:tool['_meta']['io.github.computer-mcp/risk'] for tool in tools},expected)
+        for tool in tools:
+            risk = expected[tool['name']]
+            self.assertEqual(tool['annotations']['readOnlyHint'],risk=='read-only')
+            self.assertEqual(tool['annotations']['destructiveHint'],risk in {'destructive','full-shell'})
     def test_acp_prompt_through_mcp(self):
         r=self.value(self.call('prompt',{'prompt':'hello'}))
         self.assertEqual(r['text'],'hello');self.assertEqual(r['stop_reason'],'end_turn')

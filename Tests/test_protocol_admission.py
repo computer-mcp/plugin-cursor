@@ -21,7 +21,7 @@ class ProtocolAdmissionTests(unittest.TestCase):
             if not release.wait(2): raise AssertionError('fixture not released')
             job.check()
             return {'finished':True}
-        server=runtime.MCPServer('fixture','1',[runtime.Tool('hold','fixture',runtime.schema({}),handler)],lambda:None)
+        server=runtime.MCPServer('fixture','1',[runtime.Tool('hold','fixture',runtime.schema({}),handler,risk='read-only')],lambda:None)
         server.initialized=True
         messages=[]
         def write(_fd,data,*_): messages.append(json.loads(data))

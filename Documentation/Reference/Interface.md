@@ -8,6 +8,19 @@ The CLI contribution preserves the declared argv order, optional native flags an
 
 The MCP adapter implements standard newline-delimited JSON-RPC over stdio, with MCP initialization, tools/list, tools/call, ping and cancellation notifications. Supported MCP dates are 2024-11-05, 2025-03-26 and 2025-06-18. An unsupported proposed date receives the adapter's supported date rather than an unimplemented echo. Tool results use `structuredContent.result`; tool failures set `isError` and include an error code. Protocol errors remain JSON-RPC errors. Tool schemas are the callable source of truth.
 
+## Host risk metadata
+
+Every MCP tool declares `_meta["io.github.computer-mcp/risk"]`. Model execution
+and continuation declare `full-shell`: native permission defaults are not a
+host-enforced sandbox. Catalog, result, event and pending-request inspection
+declare `read-only`. Cancellation and owned-process retirement declare
+`destructive`. The host applies these as minimum classifications, intersects
+its own grants, and retains approval authority. Standard MCP annotations remain
+hints rather than permissions.
+
+Session open/load, mode changes and interactive responses also declare
+`full-shell`; they can initialize native tools or continue executable work.
+
 ## Tools
 
 | Native MCP tool | Behavior |

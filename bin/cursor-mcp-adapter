@@ -471,18 +471,18 @@ class Cursor:
             raise Failure('cleanup_unconfirmed', 'One or more Cursor sessions could not confirm cleanup')
     def tools(self):
         return [
-            Tool('cursor.acp.prompt','Run one Cursor ACP prompt and retire its owned process. Use explicit sessions for interactive input.',schema({**OPEN_FIELDS,**PROMPT_FIELDS},['prompt']),self.once),
-            Tool('cursor.acp.session.open','Initialize Cursor ACP, authenticate existing vendor credentials, and create or load a session in the host-selected working directory.',schema(OPEN_FIELDS),self.open),
-            Tool('cursor.acp.session.prompt','Prompt an existing Cursor ACP session; read events and answer pending requests concurrently.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.prompt),
-            Tool('cursor.acp.session.prompt.start','Start a prompt without holding a long MCP request; use its prompt ID to read completion.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.start_prompt),
-            Tool('cursor.acp.session.prompt.result','Read the most recent background prompt result without replaying it.',schema({'session':SESSION,'prompt_id':text_schema(64)},['session','prompt_id']),self.prompt_result),
-            Tool('cursor.acp.session.list','List only this adapter connection\'s Cursor sessions.',schema({}),self.listing),
-            Tool('cursor.acp.session.mode','Select a mode advertised by the current Cursor session.',schema({'session':SESSION,'mode':MODE},['session','mode']),self.mode),
-            Tool('cursor.acp.session.cancel','Request native ACP prompt cancellation without guessing a permission response.',schema({'session':SESSION},['session']),self.cancel),
-            Tool('cursor.acp.session.close','Close this Cursor session and retire its process group.',schema({'session':SESSION},['session']),self.close),
-            Tool('cursor.acp.events.read','Read byte-bounded Cursor events using a session-local cursor.',schema({'session':SESSION,'after_cursor':integer_schema(0,2**53-1,0),'limit':integer_schema(1,256,128),'max_bytes':integer_schema(1024,196608,196608)},['session']),self.events),
-            Tool('cursor.acp.requests.list','Read pending Cursor permission, question and plan requests; this does not approve them.',schema({'session':SESSION},['session']),self.pending),
-            Tool('cursor.acp.requests.respond','Respond once to an exact pending vendor request using its native outcome schema.',schema({'session':SESSION,'request_id':text_schema(64),'response':{'type':'object'}},['session','request_id','response']),self.answer),
+            Tool('cursor.acp.prompt','Run one Cursor ACP prompt and retire its owned process. Use explicit sessions for interactive input.',schema({**OPEN_FIELDS,**PROMPT_FIELDS},['prompt']),self.once,risk='full-shell'),
+            Tool('cursor.acp.session.open','Initialize Cursor ACP, authenticate existing vendor credentials, and create or load a session in the host-selected working directory.',schema(OPEN_FIELDS),self.open,risk='full-shell'),
+            Tool('cursor.acp.session.prompt','Prompt an existing Cursor ACP session; read events and answer pending requests concurrently.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.prompt,risk='full-shell'),
+            Tool('cursor.acp.session.prompt.start','Start a prompt without holding a long MCP request; use its prompt ID to read completion.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.start_prompt,risk='full-shell'),
+            Tool('cursor.acp.session.prompt.result','Read the most recent background prompt result without replaying it.',schema({'session':SESSION,'prompt_id':text_schema(64)},['session','prompt_id']),self.prompt_result,risk='read-only'),
+            Tool('cursor.acp.session.list','List only this adapter connection\'s Cursor sessions.',schema({}),self.listing,risk='read-only'),
+            Tool('cursor.acp.session.mode','Select a mode advertised by the current Cursor session.',schema({'session':SESSION,'mode':MODE},['session','mode']),self.mode,risk='full-shell'),
+            Tool('cursor.acp.session.cancel','Request native ACP prompt cancellation without guessing a permission response.',schema({'session':SESSION},['session']),self.cancel,risk='destructive'),
+            Tool('cursor.acp.session.close','Close this Cursor session and retire its process group.',schema({'session':SESSION},['session']),self.close,risk='destructive'),
+            Tool('cursor.acp.events.read','Read byte-bounded Cursor events using a session-local cursor.',schema({'session':SESSION,'after_cursor':integer_schema(0,2**53-1,0),'limit':integer_schema(1,256,128),'max_bytes':integer_schema(1024,196608,196608)},['session']),self.events,risk='read-only'),
+            Tool('cursor.acp.requests.list','Read pending Cursor permission, question and plan requests; this does not approve them.',schema({'session':SESSION},['session']),self.pending,risk='read-only'),
+            Tool('cursor.acp.requests.respond','Respond once to an exact pending vendor request using its native outcome schema.',schema({'session':SESSION,'request_id':text_schema(64),'response':{'type':'object'}},['session','request_id','response']),self.answer,risk='full-shell'),
         ]
 
 
