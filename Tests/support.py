@@ -82,6 +82,8 @@ def wait_file(path, seconds=8):
 
 def process_alive(pid):
     r=subprocess.run(['/bin/ps','-p',str(pid),'-o','stat='],capture_output=True,text=True,timeout=1)
+    if r.stderr.strip() or r.returncode not in (0,1):
+        raise AssertionError('Cannot verify owned process state: '+r.stderr.strip())
     return bool(r.stdout.strip()) and not r.stdout.strip().startswith('Z')
 
 

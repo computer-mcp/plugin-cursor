@@ -47,7 +47,16 @@ def decoded(raw):
         if not math.isfinite(value):
             raise ValueError('JSON floating-point number is not finite')
         return value
-    return json.loads(raw.decode('utf-8'), object_pairs_hook=unique, parse_constant=invalid_number, parse_float=finite_float)
+    value = json.loads(raw.decode('utf-8'), object_pairs_hook=unique, parse_constant=invalid_number, parse_float=finite_float)
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item,str): item.encode('utf-8')
+        elif isinstance(item,dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item,list): pending.extend(item)
+    return value
 
 
 def schema(properties, required=()):
@@ -237,7 +246,7 @@ def supervise(read_fd, receipt_fd, command):
                             ['/bin/ps', '-g', str(child.pid), '-o', 'pid=,stat='],
                             capture_output=True, text=True, timeout=1)
                         rows = [line.split() for line in report.stdout.splitlines() if line.strip()]
-                        if report.returncode not in (0, 1) or any(
+                        if report.stderr.strip() or report.returncode not in (0, 1) or any(
                             len(row) != 2 or not row[1].startswith('Z') for row in rows
                         ):
                             raise Failure('cleanup_unconfirmed', 'Owned group could not be retired')
@@ -473,7 +482,15 @@ class MCPServer:
         self.lock, self.write_lock = threading.Lock(), threading.Lock()
         self.initialized = False
     def emit(self, message):
-        raw = encoded(message)+b'\n'
+        try:
+            raw = encoded(message)+b'\n'
+        except (ValueError,UnicodeError,RecursionError):
+            try:
+                self.id_key(message.get('id'))
+                identifier = message['id']
+            except ValueError:
+                identifier = None
+            raw = encoded({'jsonrpc':'2.0','id':identifier,'error':{'code':-32603,'message':'Response cannot be encoded'}})+b'\n'
         if len(raw) > MAX_FRAME:
             raw = encoded({'jsonrpc':'2.0','id':message.get('id'),'error':{'code':-32603,'message':'Response exceeds the protocol bound'}})+b'\n'
         try:
@@ -507,6 +524,7 @@ class MCPServer:
     def id_key(value):
         if type(value) not in (int,str) or (isinstance(value,str) and (not value or len(value)>256)):
             raise ValueError('Invalid request ID')
+        if isinstance(value,str): value.encode('utf-8')
         return type(value).__name__, value
     def dispatch(self, message):
         if not isinstance(message, dict) or message.get('jsonrpc') != '2.0' or not isinstance(message.get('method'),str):
@@ -524,14 +542,18 @@ class MCPServer:
         try: key = self.id_key(request_id)
         except ValueError:
             self.rpc_error(None,-32600,'Invalid request ID'); return
+        with self.lock: active = key in self.jobs
+        if active:
+            self.rpc_error(request_id,-32600,'Request ID is already active'); return
         if not isinstance(params,dict):
             self.rpc_error(request_id,-32602,'Parameters must be an object'); return
         if method == 'initialize':
             if self.initialized:
                 self.rpc_error(request_id,-32600,'Connection is already initialized'); return
             requested = params.get('protocolVersion')
-            if not isinstance(requested,str):
-                self.rpc_error(request_id,-32602,'protocolVersion is required'); return
+            client = params.get('clientInfo')
+            if not isinstance(requested,str) or not isinstance(params.get('capabilities'),dict) or not isinstance(client,dict) or not all(isinstance(client.get(k),str) and client[k] for k in ('name','version')):
+                self.rpc_error(request_id,-32602,'Initialize requires protocolVersion, capabilities and typed clientInfo'); return
             self.initialized = True
             self.emit({'jsonrpc':'2.0','id':request_id,'result':{'protocolVersion':requested if requested in SUPPORTED_MCP else SUPPORTED_MCP[-1],'capabilities':{'tools':{'listChanged':False}},'serverInfo':{'name':self.name,'version':self.version}}})
         elif method == 'ping':

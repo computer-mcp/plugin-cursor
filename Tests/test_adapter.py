@@ -64,6 +64,20 @@ class AdapterTests(unittest.TestCase):
         self.value(self.call('session.cancel',{'session':session}))
         self.assertEqual(Client.value(self.client.wait(request))['stop_reason'],'cancelled')
         self.value(self.call('session.prompt',{'session':session,'prompt':'after-cancel'}))
+    def test_unsettled_native_cancellation_retires_owned_session(self):
+        session=self.open()
+        request=self.client.begin('cursor.acp.session.prompt',{'session':session,'prompt':'ignore-cancel'})
+        for _ in range(80):
+            if self.value(self.call('events.read',{'session':session}))['events']:break
+            time.sleep(.02)
+        else:self.fail('Native prompt did not start')
+        started=time.monotonic()
+        self.value(self.call('session.cancel',{'session':session}))
+        result=Client.value(self.client.wait(request))
+        self.assertEqual(result['error']['code'],'cancelled')
+        self.assertLess(time.monotonic()-started,5)
+        self.assertTrue(self.call('session.prompt',{'session':session,'prompt':'after'})['result']['isError'])
+
     def test_early_exit_does_not_drop_buffered_result(self):
         self.assertEqual(self.value(self.call('prompt',{'prompt':'exit-fast'}))['stop_reason'],'end_turn')
     def test_aggregate_events_are_bounded_and_cursor_progresses(self):
