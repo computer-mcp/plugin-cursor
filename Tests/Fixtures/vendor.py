@@ -14,6 +14,7 @@ assert sys.argv[1:]==['acp']
 session='fixture-session'
 waiting={}
 active=None
+ignore_cancel=False
 
 def emit(value):print(json.dumps(value),flush=True)
 def reply(identifier,value):emit({'jsonrpc':'2.0','id':identifier,'result':value})
@@ -31,6 +32,7 @@ for line in sys.stdin:
     elif method=='session/set_mode':reply(identifier,{'observed_mode':params['modeId']})
     elif method=='session/prompt':
         prompt=params['prompt'][0]['text'];active=identifier
+        ignore_cancel=prompt=='ignore-cancel'
         if prompt in ('permission','question','plan'):
             if prompt=='permission':
                 name='session/request_permission';value={'sessionId':session,'toolCall':{'toolCallId':'fixture-tool','title':'Fixture permission'},'options':[{'optionId':'opaque-yes','kind':'allow_once','name':'Allow once'},{'optionId':'opaque-no','kind':'reject_once','name':'Reject once'}]}
@@ -40,7 +42,7 @@ for line in sys.stdin:
                 name='cursor/create_plan';value={'toolCallId':'fixture-plan','plan':'Fixture plan','todos':[]}
             waiting[900]=identifier
             emit({'jsonrpc':'2.0','id':900,'method':name,'params':value})
-        elif prompt=='slow':update('started')
+        elif prompt in ('slow','ignore-cancel'):update('started')
         elif prompt=='fork':
             child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'])
             Path(os.environ['FIXTURE_MARKER']).write_text(json.dumps([os.getpid(),child.pid]))
@@ -56,7 +58,7 @@ for line in sys.stdin:
             finish(identifier)
         else:update('hello');finish(identifier)
     elif method=='session/cancel':
-        if active is not None:finish(active,'cancelled');active=None
+        if active is not None and not ignore_cancel:finish(active,'cancelled');active=None
     elif method is None and identifier in waiting:
         update(json.dumps({'received_response':q.get('result')}))
         finish(waiting.pop(identifier))

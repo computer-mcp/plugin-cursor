@@ -16,10 +16,15 @@ import sys
 import threading
 import time
 import tomllib
+import uuid
 
 MAX_FRAME = 1_048_576
 MAX_RESULT = 196_608
 SUPPORTED_MCP = ('2024-11-05', '2025-03-26', '2025-06-18')
+WORK_URI = 'computer-mcp://runtime/work/v1'
+WORK_METADATA = 'io.github.computer-mcp/work'
+CONTINUATION_METADATA = 'io.github.computer-mcp/continuation'
+WORK_INVOCATION = 'io.github.computer-mcp/work-invocation'
 
 
 class Failure(Exception):
@@ -47,7 +52,16 @@ def decoded(raw):
         if not math.isfinite(value):
             raise ValueError('JSON floating-point number is not finite')
         return value
-    return json.loads(raw.decode('utf-8'), object_pairs_hook=unique, parse_constant=invalid_number, parse_float=finite_float)
+    value = json.loads(raw.decode('utf-8'), object_pairs_hook=unique, parse_constant=invalid_number, parse_float=finite_float)
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item,str): item.encode('utf-8')
+        elif isinstance(item,dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item,list): pending.extend(item)
+    return value
 
 
 def schema(properties, required=()):
@@ -107,8 +121,9 @@ def validate(value, spec, location='arguments', depth=0):
 
 
 class Job:
-    def __init__(self):
+    def __init__(self, work_invocation=None):
         self.cancelled = threading.Event()
+        self.work_invocation = work_invocation
     def cancel(self):
         self.cancelled.set()
     def check(self):
@@ -237,7 +252,7 @@ def supervise(read_fd, receipt_fd, command):
                             ['/bin/ps', '-g', str(child.pid), '-o', 'pid=,stat='],
                             capture_output=True, text=True, timeout=1)
                         rows = [line.split() for line in report.stdout.splitlines() if line.strip()]
-                        if report.returncode not in (0, 1) or any(
+                        if report.stderr.strip() or report.returncode not in (0, 1) or any(
                             len(row) != 2 or not row[1].startswith('Z') for row in rows
                         ):
                             raise Failure('cleanup_unconfirmed', 'Owned group could not be retired')
@@ -285,10 +300,15 @@ class Process:
         self.stderr = bytearray()
         self.stderr_truncated = False
         self.stop_stderr = threading.Event()
-        os.set_blocking(self.child.stdin.fileno(), False)
-        self.output = LineReader(self.child.stdout)
-        self.stderr_thread = threading.Thread(target=self._stderr, daemon=True)
-        self.stderr_thread.start()
+        self.output, self.stderr_thread = None, None
+        try:
+            os.set_blocking(self.child.stdin.fileno(), False)
+            self.output = LineReader(self.child.stdout)
+            self.stderr_thread = threading.Thread(target=self._stderr, daemon=True)
+            self.stderr_thread.start()
+        except BaseException:
+            self.close()
+            raise
     def _stderr(self):
         try:
             with selectors.DefaultSelector() as selector:
@@ -346,30 +366,33 @@ class Process:
                     raise self.cleanup_failure
                 return
             self.closed = True
-            os.close(self.life)
             try:
                 try:
-                    self.child.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    self.child.terminate()
+                    os.close(self.life)
                     try:
-                        self.child.wait(timeout=2)
-                    except subprocess.TimeoutExpired as error:
-                        self.child.kill()
-                        self.child.wait(timeout=2)
-                        raise Failure('cleanup_unconfirmed', 'Vendor supervisor did not confirm shutdown') from error
-                self.confirm_cleanup(self.receipt)
-            except Failure as error:
-                self.cleanup_failure = error
-                raise
-            finally:
-                os.close(self.receipt)
-                self.output.close()
-                self.stop_stderr.set()
-                self.stderr_thread.join(timeout=.5)
-                with self.writer_lock:
-                    for stream in (self.child.stdin, self.child.stdout, self.child.stderr):
-                        stream.close()
+                        self.child.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self.child.terminate()
+                        try:
+                            self.child.wait(timeout=2)
+                        except subprocess.TimeoutExpired as error:
+                            self.child.kill()
+                            self.child.wait(timeout=2)
+                            raise Failure('cleanup_unconfirmed', 'Vendor supervisor did not confirm shutdown') from error
+                    self.confirm_cleanup(self.receipt)
+                finally:
+                    os.close(self.receipt)
+                    if self.output is not None: self.output.close()
+                    self.stop_stderr.set()
+                    if self.stderr_thread is not None and self.stderr_thread.ident is not None:
+                        self.stderr_thread.join(timeout=.5)
+                    with self.writer_lock:
+                        for stream in (self.child.stdin, self.child.stdout, self.child.stderr):
+                            stream.close()
+            except Exception as error:
+                self.cleanup_failure = error if isinstance(error,Failure) else Failure('cleanup_unconfirmed','Owned process cleanup could not be confirmed')
+                if self.cleanup_failure is error: raise
+                raise self.cleanup_failure from error
 
 
 def resolve_executable(explicit, environment_key, default):
@@ -391,7 +414,7 @@ def load_package(entry):
     return manifest, tree
 
 
-def verify_version(executable, tree, job, cwd):
+def verify_version(executable, tree, job, cwd, retain_process=None):
     expected = next((x.get('stdout') for x in tree.get('executable_checks', []) if x.get('args') == ['--version']), None)
     if expected is None:
         raise Failure('invalid_configuration', 'Package lacks its native version assertion')
@@ -399,6 +422,7 @@ def verify_version(executable, tree, job, cwd):
     deadline = time.monotonic()+5
     output = bytearray()
     try:
+        if retain_process is not None: retain_process(process)
         process.end_input()
         while True:
             raw = process.read(deadline, job)
@@ -459,12 +483,36 @@ class Tool:
     description: str
     input_schema: dict
     handler: object
+    risk: str
+    continuation: tuple[str,str] | None = None
+    def __post_init__(self):
+        if self.risk not in {'read-only','workspace-write','external-write','destructive','full-shell'}:
+            raise ValueError('Every tool requires a known publisher risk classification')
+        if self.continuation is not None:
+            kind, argument = self.continuation
+            if (not isinstance(kind,str) or not kind or len(kind.encode('utf-8'))>1024
+                    or any(ord(c)<32 or 127<=ord(c)<=159 for c in kind)
+                    or not isinstance(argument,str) or not argument
+                    or len(('/'+argument.replace('~','~0').replace('/','~1')).encode('utf-8'))>1024
+                    or any(ord(c)<32 or 127<=ord(c)<=159 for c in argument)
+                    or argument not in self.input_schema.get('required',[])
+                    or self.input_schema.get('properties',{}).get(argument,{}).get('type') not in {'string','integer'}):
+                raise ValueError('Continuation requires a resource kind and required scalar handle')
     def definition(self):
-        return {'name':self.name,'description':self.description,'inputSchema':self.input_schema}
+        read_only = self.risk == 'read-only'
+        metadata = {'io.github.computer-mcp/risk':self.risk}
+        if self.continuation is not None:
+            kind, argument = self.continuation
+            pointer = '/' + argument.replace('~','~0').replace('/','~1')
+            metadata[CONTINUATION_METADATA] = {'format_version':1,'selectors':[{'kind':kind,'handles':{'id':pointer}}]}
+        return {'name':self.name,'description':self.description,'inputSchema':self.input_schema,
+                '_meta':metadata,
+                'annotations':{'readOnlyHint':read_only,'destructiveHint':self.risk in {'destructive','full-shell'},
+                               'idempotentHint':read_only,'openWorldHint':not read_only}}
 
 
 class MCPServer:
-    def __init__(self, name, version, tools, shutdown):
+    def __init__(self, name, version, tools, shutdown, work=None):
         self.name, self.version = name, version
         self.tools = {t.name:t for t in tools}
         self.shutdown = shutdown
@@ -472,8 +520,54 @@ class MCPServer:
         self.jobs, self.threads = {}, set()
         self.lock, self.write_lock = threading.Lock(), threading.Lock()
         self.initialized = False
+        self.work = work
+        self.work_instance = str(uuid.uuid4())
+        self.work_revision = 0
+        self.work_last = None
+    def work_resource(self):
+        resources = self.work()
+        if not isinstance(resources,list) or len(resources)>1024:
+            raise Failure('work_unavailable','Complete work observation is unavailable')
+        keys = set()
+        rows = []
+        def identifier(value):
+            return isinstance(value,str) and 0<len(value.encode('utf-8'))<=1024 and not any(ord(c)<32 or 127<=ord(c)<160 for c in value)
+        for resource in resources:
+            if not isinstance(resource,dict) or set(resource)!={'kind','id','acquired_by','state'}:
+                raise Failure('work_unavailable','Complete work observation is unavailable')
+            kind, key = resource['kind'], resource['id']
+            if not identifier(kind) or not (identifier(key) or type(key) is int and -(2**63)<=key<2**63):
+                raise Failure('work_unavailable','Work resource identity is invalid')
+            try:
+                origin = str(uuid.UUID(resource['acquired_by']))
+            except (ValueError,TypeError,AttributeError):
+                raise Failure('work_unavailable','Live work has no bound host acquisition reference') from None
+            identity = kind, type(key).__name__, key
+            if identity in keys or resource['state'] not in ('active','uncertain'):
+                raise Failure('work_unavailable','Work resource ownership is ambiguous')
+            keys.add(identity)
+            rows.append({**resource,'acquired_by':origin})
+        rows.sort(key=lambda row:(row['kind'],type(row['id']).__name__,row['id']))
+        changed = self.work_last is not None and self.work_last!=rows
+        revision = self.work_revision+int(changed)
+        if revision>=2**63:
+            raise Failure('work_unavailable','Work observation revision is exhausted')
+        snapshot = {'format_version':1,'instance_id':self.work_instance,'revision':revision,'resources':rows}
+        body = encoded(snapshot)
+        if len(body)>524288:
+            raise Failure('work_unavailable','Complete work observation exceeds its byte bound')
+        self.work_revision, self.work_last = revision, rows
+        return {'contents':[{'uri':WORK_URI,'mimeType':'application/json','text':body.decode('utf-8')}]}
     def emit(self, message):
-        raw = encoded(message)+b'\n'
+        try:
+            raw = encoded(message)+b'\n'
+        except (ValueError,UnicodeError,RecursionError):
+            try:
+                self.id_key(message.get('id'))
+                identifier = message['id']
+            except ValueError:
+                identifier = None
+            raw = encoded({'jsonrpc':'2.0','id':identifier,'error':{'code':-32603,'message':'Response cannot be encoded'}})+b'\n'
         if len(raw) > MAX_FRAME:
             raw = encoded({'jsonrpc':'2.0','id':message.get('id'),'error':{'code':-32603,'message':'Response exceeds the protocol bound'}})+b'\n'
         try:
@@ -507,6 +601,7 @@ class MCPServer:
     def id_key(value):
         if type(value) not in (int,str) or (isinstance(value,str) and (not value or len(value)>256)):
             raise ValueError('Invalid request ID')
+        if isinstance(value,str): value.encode('utf-8')
         return type(value).__name__, value
     def dispatch(self, message):
         if not isinstance(message, dict) or message.get('jsonrpc') != '2.0' or not isinstance(message.get('method'),str):
@@ -524,16 +619,22 @@ class MCPServer:
         try: key = self.id_key(request_id)
         except ValueError:
             self.rpc_error(None,-32600,'Invalid request ID'); return
+        with self.lock: active = key in self.jobs
+        if active:
+            self.rpc_error(request_id,-32600,'Request ID is already active'); return
         if not isinstance(params,dict):
             self.rpc_error(request_id,-32602,'Parameters must be an object'); return
         if method == 'initialize':
             if self.initialized:
                 self.rpc_error(request_id,-32600,'Connection is already initialized'); return
             requested = params.get('protocolVersion')
-            if not isinstance(requested,str):
-                self.rpc_error(request_id,-32602,'protocolVersion is required'); return
+            client = params.get('clientInfo')
+            if not isinstance(requested,str) or not isinstance(params.get('capabilities'),dict) or not isinstance(client,dict) or not all(isinstance(client.get(k),str) and client[k] for k in ('name','version')):
+                self.rpc_error(request_id,-32602,'Initialize requires protocolVersion, capabilities and typed clientInfo'); return
             self.initialized = True
-            self.emit({'jsonrpc':'2.0','id':request_id,'result':{'protocolVersion':requested if requested in SUPPORTED_MCP else SUPPORTED_MCP[-1],'capabilities':{'tools':{'listChanged':False}},'serverInfo':{'name':self.name,'version':self.version}}})
+            capabilities = {'tools':{'listChanged':False}}
+            if self.work is not None: capabilities['resources'] = {'subscribe':False,'listChanged':False}
+            self.emit({'jsonrpc':'2.0','id':request_id,'result':{'protocolVersion':requested if requested in SUPPORTED_MCP else SUPPORTED_MCP[-1],'capabilities':capabilities,'serverInfo':{'name':self.name,'version':self.version}}})
         elif method == 'ping':
             self.emit({'jsonrpc':'2.0','id':request_id,'result':{}})
         elif not self.initialized:
@@ -541,18 +642,44 @@ class MCPServer:
         elif method == 'tools/list':
             if params.get('cursor'):
                 self.rpc_error(request_id,-32602,'This finite catalog has no continuation cursor'); return
-            self.emit({'jsonrpc':'2.0','id':request_id,'result':{'tools':[t.definition() for t in self.tools.values()]}})
+            definitions = [t.definition() for t in self.tools.values()]
+            if self.work is not None:
+                for definition in definitions:
+                    definition['_meta'][WORK_METADATA] = {'format_version':1,'uri':WORK_URI}
+            self.emit({'jsonrpc':'2.0','id':request_id,'result':{'tools':definitions}})
+        elif method == 'resources/list' and self.work is not None:
+            if params.get('cursor'):
+                self.rpc_error(request_id,-32602,'This finite resource catalog has no continuation cursor'); return
+            self.emit({'jsonrpc':'2.0','id':request_id,'result':{'resources':[{'uri':WORK_URI,'name':'Runtime work','mimeType':'application/json','description':'Complete connection-owned live work and cleanup observation.'}]}})
+        elif method == 'resources/read' and self.work is not None:
+            if params.get('uri') != WORK_URI:
+                self.rpc_error(request_id,-32602,'Unknown resource'); return
+            try: result = self.work_resource()
+            except Failure as error:
+                self.rpc_error(request_id,-32000,str(error)); return
+            except Exception:
+                self.rpc_error(request_id,-32000,'Complete work observation is unavailable'); return
+            self.emit({'jsonrpc':'2.0','id':request_id,'result':result})
         elif method == 'tools/call':
             name = params.get('name')
             if not isinstance(name,str) or name not in self.tools:
                 self.rpc_error(request_id,-32602,'Unknown tool'); return
             args = params.get('arguments', {})
+            origin = None
+            if self.work is not None:
+                meta = params.get('_meta',{})
+                if not isinstance(meta,dict):
+                    self.rpc_error(request_id,-32602,'Tool metadata must be an object'); return
+                if WORK_INVOCATION in meta:
+                    try: origin = str(uuid.UUID(meta[WORK_INVOCATION]))
+                    except (ValueError,TypeError,AttributeError):
+                        self.rpc_error(request_id,-32602,'Work invocation reference must be a UUID'); return
             with self.lock:
                 if key in self.jobs:
                     self.rpc_error(request_id,-32600,'Request ID is already active'); return
                 if len(self.jobs)>=16:
                     self.rpc_error(request_id,-32000,'Concurrent request capacity reached'); return
-                job = Job()
+                job = Job(work_invocation=origin)
                 thread = threading.Thread(target=self.call,args=(request_id,key,self.tools[name],args,job))
                 self.jobs[key] = job
                 self.threads.add(thread)

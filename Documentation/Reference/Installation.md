@@ -14,6 +14,8 @@ The example exposes this plugin's complete MCP tool catalog with no extra prefix
 
 On Computer MCP 1.2.2, plugin activation/selection changes require idle Gateway client admission. Finish or safely pause clients before production installation changes. No host binary replacement or host release is required. Do not restart the active development control connection merely to test installation.
 
+Computer MCP 1.3.0 publishes plugin configuration changes to connected clients atomically. New calls use the current configuration; existing work keeps its owning runtime until release. Installation does not grant access, and later calls use current authorization.
+
 ## Build
 
 ```sh
@@ -28,16 +30,25 @@ CI runs deterministic fixture tests and packaging; it does not install a vendor 
 
 ## Isolated host interoperability
 
-After packaging, validate the exact ZIP with an unchanged installed Computer MCP 1.2.2 binary:
+After packaging, validate the exact ZIP against the reviewed Computer MCP binary. Select its release version explicitly; a mismatch fails before package extraction:
 
 ```sh
 python3 Scripts/validate_host.py \
-  --host "/Applications/Computer MCP.app/Contents/Resources/computer-mcp" \
+  --host "/absolute/path/to/candidate/computer-mcp" \
+  --expected-host-version 1.3.0 \
   --archive /output/PLUGIN.zip \
   --output /new/evidence/directory
 ```
 
-Replace `PLUGIN.zip` with the package's actual archive name. This uses a temporary directory and the installed host's archive worker and standalone MCP entrypoint. It does not connect to the production App's control socket or database. Vendor tool execution is replaced with inert fixtures; the native version/help check is a separate command. A new evidence directory is required to avoid overwriting an earlier run.
+Replace `PLUGIN.zip` with the package's actual archive name. This uses a temporary directory and the selected host's archive worker and standalone MCP entrypoint. It does not connect to the production App's control socket or database. Vendor tool execution is replaced with inert fixtures; the native version/help check is a separate command. A new evidence directory is required to avoid overwriting an earlier run.
+
+For a candidate host implementing the provider-work contract, add
+`--require-work-ownership`. This gate verifies the same connection retains an
+opened session, a detached prompt waiting for input and an idle session, then
+observes no owners after confirmed session close. It also checks that the
+gateway does not reexport the downstream-only resource declaration. Hosts
+without this observation surface can still run the ordinary interoperability
+gate without that option.
 
 A real ACP handshake can be checked independently, without authenticating, opening a conversation or invoking a model:
 
