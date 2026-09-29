@@ -108,7 +108,7 @@ enabled = []
 '''
 
 
-def validate(host, archive, output, require_work_ownership=False):
+def validate(host, archive, output, expected_host_version, require_work_ownership=False):
     host = host.resolve(strict=True)
     archive = archive.resolve(strict=True)
     output.mkdir(parents=True, exist_ok=False)
@@ -126,7 +126,8 @@ def validate(host, archive, output, require_work_ownership=False):
         environment = {'PATH': os.pathsep.join([str(Path(sys.executable).parent), '/usr/bin', '/bin', '/usr/sbin', '/sbin']),
                        'HOME': str(home), 'TMPDIR': str(work), 'PYTHONDONTWRITEBYTECODE': '1', 'LANG': 'en_US.UTF-8'}
         version = capture([str(host), '--version'], work, environment).decode().strip()
-        require(version.startswith('1.2.2 '), 'This validator targets Computer MCP 1.2.2; review another host before use')
+        require(bool(expected_host_version) and version.startswith(expected_host_version + ' '),
+                'Host version differs from the explicitly selected acceptance version')
         inputs = work / 'inputs'
         inputs.mkdir()
         (inputs / f'{vendor}.zip').write_bytes(archive.read_bytes())
@@ -260,6 +261,7 @@ def validate(host, archive, output, require_work_ownership=False):
     require(digest(host) == host_hash and digest(archive) == archive_hash, 'Host or archive changed during acceptance')
     report = {'status':'passed', 'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
               'plugin_id':vendor, 'plugin_version':manifest['version'], 'host_version':version,
+              'expected_host_version':expected_host_version,
               'host_sha256':host_hash, 'archive_sha256':archive_hash, 'checks':checks,
               'scope':'host archive validation and ordinary standalone registrations with inert vendor fixtures',
               'production_installation':False, 'authenticated_model_execution':False,
@@ -271,12 +273,14 @@ def validate(host, archive, output, require_work_ownership=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', required=True, type=Path)
+    parser.add_argument('--expected-host-version', required=True,
+                        help='Exact reviewed host release version, for example 1.3.0')
     parser.add_argument('--archive', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--require-work-ownership', action='store_true',
                         help='Require a candidate host to observe session ownership through final release')
     args = parser.parse_args()
-    validate(args.host, args.archive, args.output, args.require_work_ownership)
+    validate(args.host, args.archive, args.output, args.expected_host_version, args.require_work_ownership)
 
 
 if __name__ == '__main__':
