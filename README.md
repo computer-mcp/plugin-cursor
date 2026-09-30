@@ -1,4 +1,9 @@
-# Cursor Plugin
+![Computer MCP — Cursor](Documentation/Brand/header.svg)
+
+# Computer MCP — Cursor
+
+Part of the [Computer MCP](https://computer-mcp.github.io/) family.
+**Let ChatGPT use your local tools.**
 
 An independent Computer MCP plugin for Cursor. The same package contributes a canonical CLI Tree, a stdio MCP adapter and client-neutral usage Skills. It does not link Computer MCP Core or require a host release to add vendor behavior.
 
