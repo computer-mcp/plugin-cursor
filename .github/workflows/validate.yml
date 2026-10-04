@@ -23,7 +23,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: |
-          python3 Scripts/check-brand.py
           python3 -m unittest discover -s Tests -p 'test_*.py'
           python3 Scripts/build_package.py dist > package-receipt.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -47,3 +46,5 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python3 Tests/check_runtime_rejection.py
+  brand:
+    uses: computer-mcp/.github/.github/workflows/brand-check.yml@9b58c7b9823a808273c8a60d4676c6555b2bcaad # master

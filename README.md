@@ -1,9 +1,12 @@
-![Computer MCP — Cursor](Documentation/Brand/header.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="Documentation/Brand/header-dark.png">
+  <img alt="Computer MCP — Cursor" src="Documentation/Brand/header-light.png">
+</picture>
 
 # Computer MCP — Cursor
 
 Part of the [Computer MCP](https://computer-mcp.github.io/) family.
-**Let ChatGPT use your local tools.**
+**Wherever you chat, your computer is there.**
 
 An independent Computer MCP plugin for Cursor. The same package contributes a canonical CLI Tree, a stdio MCP adapter and client-neutral usage Skills. It does not link Computer MCP Core or require a host release to add vendor behavior.
 
