@@ -1,0 +1,187 @@
+{
+  "format_version": 1,
+  "source": "Cursor Agent CLI 2026.05.04-08e5280; verified --help and official CLI documentation",
+  "executable_version": "2026.05.04-08e5280",
+  "coverage": "partial",
+  "omissions": [
+    "Interactive TUI, login/logout/update, shell-integration mutation, worktree lifecycle, MCP administration, and rule generation are intentionally omitted from the typed CLI surface.",
+    "ACP is exposed separately through the package MCP adapter. Unknown future flags require a reviewed plugin update."
+  ],
+  "executable_checks": [
+    {
+      "args": [
+        "--version"
+      ],
+      "stdout": "2026.05.04-08e5280\n"
+    }
+  ],
+  "commands": [
+    {
+      "id": "print",
+      "path": [],
+      "description": "Run Cursor Agent non-interactively and return its JSON result.",
+      "executable": true,
+      "help_argv": [
+        "--help"
+      ],
+      "parameters": [
+        {
+          "name": "prompt",
+          "description": "Task or question for Cursor Agent.",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 131072
+          }
+        },
+        {
+          "name": "mode",
+          "description": "Read-only execution mode. Omit for normal Agent mode.",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "ask"
+            ]
+          }
+        },
+        {
+          "name": "model",
+          "description": "Cursor model identifier.",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        {
+          "name": "resume_chat_id",
+          "description": "Resume an existing chat by id.",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        {
+          "name": "continue_previous",
+          "description": "Continue the previous session.",
+          "required": false,
+          "default": false,
+          "conflicts": [
+            "resume_chat_id"
+          ],
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "force",
+          "description": "Force-allow commands unless explicitly denied by Cursor configuration.",
+          "required": false,
+          "default": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "sandbox",
+          "description": "Override Cursor sandbox mode.",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "enabled",
+              "disabled"
+            ]
+          }
+        },
+        {
+          "name": "trust",
+          "description": "Trust the current workspace in headless mode.",
+          "required": false,
+          "default": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "approve_mcps",
+          "description": "Automatically approve configured MCP servers.",
+          "required": false,
+          "default": false,
+          "schema": {
+            "type": "boolean"
+          }
+        }
+      ],
+      "argv": [
+        {
+          "kind": "literal",
+          "value": "-p"
+        },
+        {
+          "kind": "literal",
+          "value": "--output-format=json"
+        },
+        {
+          "kind": "option",
+          "parameter": "mode",
+          "flag": "--mode",
+          "style": "equals"
+        },
+        {
+          "kind": "option",
+          "parameter": "model",
+          "flag": "--model",
+          "style": "equals"
+        },
+        {
+          "kind": "option",
+          "parameter": "resume_chat_id",
+          "flag": "--resume",
+          "style": "equals"
+        },
+        {
+          "kind": "flag",
+          "parameter": "continue_previous",
+          "flag": "--continue"
+        },
+        {
+          "kind": "flag",
+          "parameter": "force",
+          "flag": "--force"
+        },
+        {
+          "kind": "option",
+          "parameter": "sandbox",
+          "flag": "--sandbox",
+          "style": "equals"
+        },
+        {
+          "kind": "flag",
+          "parameter": "trust",
+          "flag": "--trust"
+        },
+        {
+          "kind": "flag",
+          "parameter": "approve_mcps",
+          "flag": "--approve-mcps"
+        },
+        {
+          "kind": "literal",
+          "value": "--"
+        },
+        {
+          "kind": "positional",
+          "parameter": "prompt"
+        }
+      ],
+      "stdout": "json"
+    }
+  ]
+}
