@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 import zipfile
 
@@ -18,9 +19,12 @@ class PackageTests(unittest.TestCase):
     def test_reproducible_archive_and_executable_mode(self):
         first,manifest=builder.package_bytes(ROOT)
         self.assertEqual(first,builder.package_bytes(ROOT)[0])
+        self.assertIs(type(manifest['plugin_api']),int)
+        self.assertEqual(manifest['plugin_api'],1)
         with zipfile.ZipFile(io.BytesIO(first)) as archive:
             names=archive.namelist()
             self.assertIn('computer-mcp-plugin.toml',names)
+            self.assertEqual(tomllib.loads(archive.read('computer-mcp-plugin.toml').decode()),manifest)
             self.assertIn('cli-tree.json',names)
             self.assertIn('bin/plugin_runtime.py',names)
             for entry in archive.infolist():

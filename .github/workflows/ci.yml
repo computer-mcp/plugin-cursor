@@ -47,5 +47,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python3 Tests/check_runtime_rejection.py
+  runtime:
+    uses: computer-mcp/.github/.github/workflows/plugin-runtime.yml@35766b350427ed900b456aa3c39098e97d9d3aa1 # master
   brand:
     uses: computer-mcp/.github/.github/workflows/brand-check.yml@f402911abcdfb87ef0c41a2759e8c51387b18935 # master

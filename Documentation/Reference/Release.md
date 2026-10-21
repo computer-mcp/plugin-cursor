@@ -1,28 +1,43 @@
 # Release
 
-This guide covers publishing an accepted package and notifying the official
-plugin catalog. [Versioning and Release](../Architecture/VersioningAndRelease.md)
-owns the version, acceptance and immutability rules.
+This guide covers `release.yml` and notification of the official plugin catalog.
+[Versioning and Release](../Architecture/VersioningAndRelease.md) owns this
+repository's version sources and acceptance checks. The organization's
+[VERSIONING.md](https://github.com/computer-mcp/.github/blob/master/VERSIONING.md)
+owns shared versioning, release contents, immutability and recovery rules.
+
+The repository owner must enable GitHub release immutability before the first
+release. The release workflow refuses publication unless it can verify that
+setting; enabling it is a prerequisite to publishing.
 
 ## Publish
 
 1. Confirm that `version` in `computer-mcp-plugin.toml` has not been released
-   and that the reviewed `master` commit has a successful CI run.
-2. Download that run's `cursor-plugin-<commit>-3.13` artifact. Rebuild the same
-   commit with `python3 Scripts/build_package.py <new directory>` and confirm the
-   two `cursor.zip` files are byte-identical.
-3. Run the native, ACP initialization and isolated host checks in
+   and that the reviewed `master` commit has successful `ci.yml` from a `push`.
+   Its exact archive artifact name is `cursor-plugin-<full-commit-sha>-3.13`.
+2. Dispatch `.github/workflows/release.yml` with `ref` set to that full commit
+   SHA and `publish: false` (the default). The pinned organization workflow
+   runs `python3 Scripts/build_package.py` with an output-directory argument,
+   verifies the CI source and artifact digest, and requires the rebuilt
+   `cursor.zip` to match the CI archive byte for byte.
+3. Inspect the `plugin-release-<run-id>-<attempt>` Actions artifact. Its
+   `assets/` directory contains `cursor.zip`, the generated
+   `release-receipt.json` and `SHA256SUMS`. An untagged dry run reports the
+   signed annotated tag still needed for publication.
+4. Run the native version/help, ACP initialization and isolated host checks in
    [Installation](Installation.md#isolated-host-interoperability) against that
-   exact archive.
-4. Create a signed annotated tag `vX.Y.Z` on the accepted commit and push it.
-5. Create the GitHub Release for the tag with `cursor.zip`, `SHA256SUMS` and
-   `release-receipt.json`, then publish it.
+   exact archive. Record the manual acceptance results and their limits in the
+   draft Release notes. Create and push the signed annotated `vX.Y.Z` tag on
+   the accepted commit, and target the draft Release at that full commit SHA.
+5. Dispatch `release.yml` with `ref` set to that version tag and `publish: true`.
+   The workflow verifies the tag signature and manifest version, repeats the
+   source and archive checks, completes and verifies the draft assets, and
+   publishes. Its dependent notifier runs only when `publish` is true and the
+   shared workflow reports `published: true`.
 
-`release-receipt.json` is written by the publisher; no script generates it. It
-records the plugin ID and version, tag, source commit, archive name, size and
-SHA-256, the source CI run and artifact digest, the declared compatibility, and
-the validation results with their limits. `SHA256SUMS` covers the archive and the
-receipt.
+The shared workflow generates the deterministic receipt and checksums under the
+organization's [release contents contract](https://github.com/computer-mcp/.github/blob/master/VERSIONING.md#plugin-release-contents).
+Manual acceptance evidence belongs in the Release notes.
 
 ## Catalog notification
 
@@ -44,20 +59,20 @@ that website commit first, then update the pin here when adopting a change to
 the notification contract.
 
 A release published with a repository `GITHUB_TOKEN` does not trigger
-release-event workflows. Automation that publishes that way calls the workflow
-as a dependent of the job that makes the release public:
-
-```yaml
-notify-catalog:
-  needs: publish
-  uses: ./.github/workflows/notify-catalog.yml
-  secrets:
-    CATALOG_APP_PRIVATE_KEY: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
-```
+release-event workflows. `release.yml` calls `notify-catalog.yml` as a dependent
+job after confirmed publication. Only the notifier receives
+`CATALOG_APP_PRIVATE_KEY`; the reusable release workflow receives no catalog
+secret. Dry runs do not notify the catalog.
 
 ## Retry
 
-For an operator-driven publication or a missed or failed notification, dispatch:
+For a failed publication, use **Re-run failed jobs**. Recovery preserves the
+receipt's frozen CI provenance and retains matching draft assets. Follow the
+organization's [release recovery guide](https://github.com/computer-mcp/.github/blob/master/Documentation/Reference/PluginRelease.md#run-and-recover)
+for conflicts or unavailable source artifacts. Published releases are verified
+without changing their assets.
+
+For a missed or failed notification, rerun only the notifier or dispatch:
 
 ```sh
 gh workflow run notify-catalog.yml --repo computer-mcp/plugin-cursor --ref master

@@ -9,7 +9,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'bin'))
-from plugin_runtime import Job, Process, decoded, load_package, resolve_executable, verify_version
+from plugin_runtime import Job, Process, decoded, expected_version, load_package, resolve_executable, verify_version
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
     args = parser.parse_args()
     _, tree = load_package(ROOT / 'bin/cursor-mcp-adapter')
     executable = resolve_executable(args.executable, 'CURSOR_AGENT_EXECUTABLE', 'agent')
-    verify_version(executable, tree, Job(), os.getcwd())
+    verify_version(executable, expected_version(tree), Job(), os.getcwd())
     process = Process([executable, 'acp'], os.getcwd())
     deadline = time.monotonic()+30
     response = None

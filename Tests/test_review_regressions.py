@@ -60,6 +60,18 @@ class ReviewRegressions(unittest.TestCase):
             self.assertEqual(error.exception.code,'cancelled')
             process.assert_not_called()
 
+    def test_missing_version_assertion_prevents_native_launch(self):
+        for tree in ({}, {'executable_checks': []},
+                     {'executable_checks': [{'args': ['--help'], 'stdout': 'usage\n'}]},
+                     {'executable_checks': [{'args': ['--version']}]}):
+            with self.subTest(tree=tree):
+                session=adapter.Session('handle','/unused','manual')
+                with patch.object(adapter,'TREE',tree),patch('plugin_runtime.Process') as probe,patch.object(adapter,'Process') as native:
+                    with self.assertRaises(Failure) as error:session.open({},Job())
+                    self.assertEqual(error.exception.code,'invalid_configuration')
+                    probe.assert_not_called()
+                    native.assert_not_called()
+
     def test_duplicate_and_invalid_native_request_ids_fail_closed(self):
         for identifier in (900,True,None,[],{}):
             with self.subTest(identifier=identifier):

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -47,6 +48,17 @@ class LifecycleTests(unittest.TestCase):
                 response=client.call('cursor.acp.prompt' if VENDOR=='cursor' else 'claude.run',{'prompt':'hello'})
                 self.assertEqual(Client.value(response)['error']['code'],'incompatible_vendor')
             finally:client.close()
+    def test_acp_initialization_probe_uses_native_assertion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            report=Path(temp)/'probe.json'
+            result=subprocess.run([sys.executable,str(ROOT/'Scripts/probe_acp.py'),
+                                   '--executable',str(ROOT/'Tests/Fixtures/vendor.py'),
+                                   '--output',str(report)],capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            evidence=json.loads(report.read_text())
+            self.assertEqual(evidence['status'],'passed')
+            self.assertEqual(evidence['response']['result']['protocolVersion'],1)
+            self.assertEqual(evidence['cleanup'],'confirmed')
     def test_event_buffer_reports_exact_retention_and_small_pages(self):
         events=EventBuffer(max_events=3,max_bytes=1024)
         for i in range(3):events.append({'index':i})
