@@ -414,10 +414,14 @@ def load_package(entry):
     return manifest, tree
 
 
-def verify_version(executable, tree, job, cwd, retain_process=None):
+def expected_version(tree):
     expected = next((x.get('stdout') for x in tree.get('executable_checks', []) if x.get('args') == ['--version']), None)
     if expected is None:
         raise Failure('invalid_configuration', 'Package lacks its native version assertion')
+    return expected
+
+
+def verify_version(executable, expected, job, cwd, retain_process=None):
     process = Process([executable, '--version'], cwd)
     deadline = time.monotonic()+5
     output = bytearray()

@@ -1,0 +1,31 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Version tag, or commit for a dry run
+        type: string
+        required: true
+      publish:
+        description: Publish the verified release
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  release:
+    permissions:
+      contents: write
+      actions: read
+    uses: computer-mcp/.github/.github/workflows/plugin-release.yml@35766b350427ed900b456aa3c39098e97d9d3aa1 # master
+    with:
+      ref: ${{ inputs.ref }}
+      publish: ${{ inputs.publish }}
+      build: python3 Scripts/build_package.py
+      ci_artifact: cursor-plugin-${commit}-3.13
+  notify-catalog:
+    needs: release
+    if: inputs.publish && needs.release.outputs.published == 'true'
+    permissions: {}
+    uses: ./.github/workflows/notify-catalog.yml
+    secrets:
+      CATALOG_APP_PRIVATE_KEY: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}

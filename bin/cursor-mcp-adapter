@@ -11,7 +11,7 @@ import time
 import uuid
 
 from plugin_runtime import (EventBuffer, Failure, Job, MCPServer, Process, Tool,
-    decoded, encoded, integer_schema, load_package, resolve_executable, schema,
+    decoded, encoded, expected_version, integer_schema, load_package, resolve_executable, schema,
     text_schema, validate, verify_version)
 
 MANIFEST, TREE = load_package(__file__)
@@ -135,7 +135,7 @@ class Session:
             self.startup_done.clear()
         try:
             deadline = time.monotonic()+args.get('timeout_seconds',45)
-            verify_version(self.executable,TREE,job,os.getcwd(),self.retain_version_process)
+            verify_version(self.executable,expected_version(TREE),job,os.getcwd(),self.retain_version_process)
             with self.lock: self.version_process = None
             job.check()
             with self.lock:
