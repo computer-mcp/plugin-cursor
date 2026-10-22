@@ -69,7 +69,9 @@ Use this check:
 ## Task Route
 
 - Before changing versions, dependencies, packaging or release workflows, read
-  `Documentation/Architecture/VersioningAndRelease.md` and use its existing project check entry points.
+  the [organization VERSIONING](https://github.com/computer-mcp/.github/blob/master/VERSIONING.md)
+  for version rules and `Documentation/Reference/Release.md` for release facts
+  and check entry points.
 
 - For repository-native documentation placement, read `Documentation/README.md`
   before editing.
