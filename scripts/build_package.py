@@ -10,7 +10,13 @@ import stat
 import tomllib
 import zipfile
 
+README_ASSETS = (
+    ".github/assets/logo/logo-light.png",
+    ".github/assets/logo/logo-dark.png",
+)
+
 INCLUDE = (
+    *README_ASSETS,
     "computer-mcp-plugin.toml",
     "cli-tree.json",
     "bin",
@@ -32,7 +38,10 @@ def package_bytes(root: Path):
     while pending:
         path = pending.pop()
         relative = path.relative_to(root)
-        if any(part.startswith(".") or part == "__pycache__" for part in relative.parts) or path.suffix in (".pyc", ".pyo"):
+        if relative.as_posix() not in README_ASSETS and (
+            any(part.startswith(".") or part == "__pycache__" for part in relative.parts)
+            or path.suffix in (".pyc", ".pyo")
+        ):
             continue
         count += 1
         if count > 512:

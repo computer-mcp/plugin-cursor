@@ -19,7 +19,8 @@ describes workflow verification and recovery.
 | `cursor.zip` plugin package | Package version | `version` in [`computer-mcp-plugin.toml`](../../computer-mcp-plugin.toml) | adapter `--version`, builder receipt, release tag, `release-receipt.json`, catalog entry | Edit the manifest; `tests/test_package.py` checks the packaged adapter's `--version` |
 
 The archive contains the manifest, `cli-tree.json`, `bin/`, `skills/`, the README,
-contribution guide, license, notices, `docs/` and `Examples/`.
+contribution guide, license, notices, `docs/`, `Examples/`, and the README images
+`.github/assets/logo/logo-light.png` and `.github/assets/logo/logo-dark.png`.
 Tests, build scripts and workflows are excluded from the archive.
 
 ## Compatibility Surface

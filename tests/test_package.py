@@ -27,8 +27,13 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(tomllib.loads(archive.read('computer-mcp-plugin.toml').decode()),manifest)
             self.assertIn('cli-tree.json',names)
             self.assertIn('bin/plugin_runtime.py',names)
+            assets={'.github/assets/logo/logo-light.png', '.github/assets/logo/logo-dark.png'}
+            self.assertEqual({name for name in names if name.startswith('.github/')},assets)
+            for name in assets:
+                self.assertEqual(archive.read(name),(ROOT/name).read_bytes())
             for entry in archive.infolist():
-                self.assertFalse(any(p.startswith('.') or p=='__pycache__' for p in Path(entry.filename).parts))
+                if entry.filename not in assets:
+                    self.assertFalse(any(p.startswith('.') or p=='__pycache__' for p in Path(entry.filename).parts))
                 self.assertFalse(entry.filename.endswith(('.pyc','.pyo')))
                 expected=0o755 if entry.filename==f"bin/{manifest['id']}-mcp-adapter" else 0o644
                 self.assertEqual(stat.S_IMODE(entry.external_attr>>16),expected)
@@ -45,7 +50,10 @@ class PackageTests(unittest.TestCase):
             for name in builder.INCLUDE:
                 source=ROOT/name
                 if source.is_dir():shutil.copytree(source,copy/name)
-                else:shutil.copyfile(source,copy/name)
+                else:
+                    (copy/name).parent.mkdir(parents=True,exist_ok=True)
+                    shutil.copyfile(source,copy/name)
+            (copy/'.github/assets/logo/unlisted.png').write_bytes(b'not-release-content')
             cache=copy/'bin/__pycache__';cache.mkdir(exist_ok=True)
             (cache/'arbitrary.pyc').write_bytes(b'not-release-content')
             (copy/'bin/.DS_Store').write_bytes(b'not-release-content')
