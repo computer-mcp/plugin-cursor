@@ -1,11 +1,15 @@
 name: CI
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
   push:
     branches: [master]
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   package:
     runs-on: macos-latest
@@ -48,4 +52,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python3 Tests/check_runtime_rejection.py
   runtime:
-    uses: computer-mcp/.github/.github/workflows/plugin-runtime.yml@35766b350427ed900b456aa3c39098e97d9d3aa1 # master
+    uses: computer-mcp/github-workflows/.github/workflows/plugin-runtime.yml@d65bc20504f39c3a30232d67043abeca43d2c7b1
+  validate:
+    if: always()
+    needs: [package, unsupported-runtime, runtime]
+    uses: computer-mcp/github-workflows/.github/workflows/result.yml@d65bc20504f39c3a30232d67043abeca43d2c7b1
+    with:
+      needs-json: ${{ toJSON(needs) }}
