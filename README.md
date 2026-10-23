@@ -11,8 +11,8 @@
 
 <p align="center">
   <a href="https://github.com/computer-mcp/plugin-cursor/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/computer-mcp/plugin-cursor/ci.yml?branch=master&label=CI&style=flat"></a>
-  <img alt="Python 3.13 or newer" src="https://img.shields.io/badge/Python-3.13%2B-blue?style=flat">
-  <img alt="Architecture: arm64" src="https://img.shields.io/badge/architecture-arm64-lightgrey?style=flat">
+  <a href="computer-mcp-plugin.toml"><img alt="Python 3.13 or newer" src="https://img.shields.io/badge/Python-3.13%2B-blue?style=flat"></a>
+  <a href="computer-mcp-plugin.toml"><img alt="Architecture: arm64" src="https://img.shields.io/badge/architecture-arm64-lightgrey?style=flat"></a>
   <a href="LICENSE"><img alt="License: FSL-1.1-ALv2" src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue?style=flat"></a>
 </p>
 
