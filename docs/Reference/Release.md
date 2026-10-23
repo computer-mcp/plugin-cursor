@@ -9,17 +9,17 @@ The organization [VERSIONING](https://github.com/computer-mcp/.github/blob/maste
 owns version rules, including tags, version choice and the changelog. This
 reference records this repository's version sources, compatibility, release
 procedure and checks. The shared
-[release workflow guide](https://github.com/computer-mcp/.github/blob/master/Documentation/Reference/PluginRelease.md)
+[release workflow guide](https://github.com/computer-mcp/github-workflows/blob/master/docs/plugin-release.md)
 describes workflow verification and recovery.
 
 ## Components and Version Sources
 
 | Shipped component | Version meaning | Version source | Mirrors and derived fields | Update and read-only check |
 | --- | --- | --- | --- | --- |
-| `cursor.zip` plugin package | Package version | `version` in [`computer-mcp-plugin.toml`](../../computer-mcp-plugin.toml) | adapter `--version`, builder receipt, release tag, `release-receipt.json`, catalog entry | Edit the manifest; `Tests/test_package.py` checks the packaged adapter's `--version` |
+| `cursor.zip` plugin package | Package version | `version` in [`computer-mcp-plugin.toml`](../../computer-mcp-plugin.toml) | adapter `--version`, builder receipt, release tag, `release-receipt.json`, catalog entry | Edit the manifest; `tests/test_package.py` checks the packaged adapter's `--version` |
 
 The archive contains the manifest, `cli-tree.json`, `bin/`, `skills/`, the README,
-contribution guide, license, notices, `Documentation/` and `Examples/`.
+contribution guide, license, notices, `docs/` and `Examples/`.
 Tests, build scripts and workflows are excluded from the archive.
 
 ## Compatibility Surface
@@ -39,14 +39,14 @@ checks that 3.11 and 3.12 are rejected before any vendor process starts.
 `cli-tree.json` pins the exact Cursor Agent version through its
 `executable_checks`, applied before projected CLI calls and new ACP sessions.
 A different vendor version requires a reviewed tree update verified with
-`Scripts/validate_native.py` against the real executable. ACP initialization
-uses the separate `Scripts/probe_acp.py` check. Native version/help, fixture
+`scripts/validate_native.py` against the real executable. ACP initialization
+uses the separate `scripts/probe_acp.py` check. Native version/help, fixture
 protocol, selected-host interoperability and authenticated execution are
 separate evidence classes; see [Installation](Installation.md).
 
 ## Derived Metadata and Drift Checks
 
-`Scripts/build_package.py` verifies the plugin ID, parses the CLI tree, and
+`scripts/build_package.py` verifies the plugin ID, parses the CLI tree, and
 produces the same archive bytes from the same source. Its builder receipt prints
 the ID, version and SHA-256. The release caller passes this builder to the shared
 release workflow.
@@ -69,7 +69,7 @@ The shared workflow checks that setting before writing a Release.
    Its exact archive artifact name is `cursor-plugin-<full-commit-sha>-3.13`.
 2. Dispatch `.github/workflows/release.yml` with `ref` set to that full commit
    SHA and `publish: false` (the default). The pinned organization workflow
-   runs `python3 Scripts/build_package.py` with an output-directory argument,
+   runs `python3 scripts/build_package.py` with an output-directory argument,
    verifies the CI source and artifact digest, and requires the rebuilt
    `cursor.zip` to match the CI archive byte for byte.
 3. Inspect the `plugin-release-<run-id>-<attempt>` Actions artifact. Its
@@ -135,10 +135,10 @@ acceptance record.
 
 | Operation | Existing command or explicit manual procedure | Required access |
 | --- | --- | --- |
-| Version update and check | Edit `computer-mcp-plugin.toml`; `python3 -m unittest discover -s Tests -p 'test_*.py'` | Local checkout |
-| Candidate validation and build | `ci.yml`; locally `python3 Scripts/build_package.py dist` | CI or local checkout |
-| Native acceptance | `python3 Scripts/validate_native.py --executable <agent>`; `python3 Scripts/probe_acp.py --executable <agent> --output <probe-receipt.json>` | User-installed native executable |
-| Exact archive host acceptance | `python3 Scripts/validate_host.py --host <computer-mcp> --expected-host-version X.Y.Z --archive dist/cursor.zip --output <new-evidence-directory>`; see [Installation](Installation.md#isolated-host-interoperability) | Selected host binary and candidate archive |
+| Version update and check | Edit `computer-mcp-plugin.toml`; `python3 -m unittest discover -s tests -p 'test_*.py'` | Local checkout |
+| Candidate validation and build | `ci.yml`; locally `python3 scripts/build_package.py dist` | CI or local checkout |
+| Native acceptance | `python3 scripts/validate_native.py --executable <agent>`; `python3 scripts/probe_acp.py --executable <agent> --output <probe-receipt.json>` | User-installed native executable |
+| Exact archive host acceptance | `python3 scripts/validate_host.py --host <computer-mcp> --expected-host-version X.Y.Z --archive dist/cursor.zip --output <new-evidence-directory>`; see [Installation](Installation.md#isolated-host-interoperability) | Selected host binary and candidate archive |
 | Acceptance and publication | Manual checks above; dispatch `release.yml`, dry run first | Repository Actions; publication also needs a signing key and release write access |
 | Status and interrupted-run recovery | Inspect CI or `release.yml`; follow [Retry](#retry) | Repository Actions |
 | Cleanup | Delete obsolete output and evidence under ignored `dist/`, and `package-receipt.json` | Local checkout |
@@ -153,7 +153,7 @@ per-artifact retention override.
 
 For a failed publication, use **Re-run failed jobs**. Recovery preserves the
 receipt's frozen CI provenance and retains matching draft assets. Follow the
-organization's [release recovery guide](https://github.com/computer-mcp/.github/blob/master/Documentation/Reference/PluginRelease.md#run-and-recover)
+organization's [release recovery guide](https://github.com/computer-mcp/github-workflows/blob/master/docs/plugin-release.md#run-and-recover)
 for conflicts or unavailable source artifacts. Published releases are verified
 without changing their assets.
 

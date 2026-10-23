@@ -15,7 +15,7 @@ class Client:
     def __init__(self, directory, environment=None, command=None):
         env = dict(os.environ) if command is None else {}
         env.update(environment or {})
-        env['CURSOR_AGENT_EXECUTABLE' if VENDOR=='cursor' else 'CLAUDE_CODE_EXECUTABLE'] = str(ROOT/'Tests/Fixtures/vendor.py')
+        env['CURSOR_AGENT_EXECUTABLE' if VENDOR=='cursor' else 'CLAUDE_CODE_EXECUTABLE'] = str(ROOT/'tests/Fixtures/vendor.py')
         self.process = subprocess.Popen(command or [sys.executable,str(ROOT/f'bin/{VENDOR}-mcp-adapter')],cwd=directory,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         self.buffer = bytearray()
         self.serial = 1

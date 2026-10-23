@@ -19,7 +19,7 @@ INCLUDE = (
     "CONTRIBUTING.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "Documentation",
+    "docs",
     "Examples",
 )
 

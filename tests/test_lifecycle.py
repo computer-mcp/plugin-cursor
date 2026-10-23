@@ -51,8 +51,8 @@ class LifecycleTests(unittest.TestCase):
     def test_acp_initialization_probe_uses_native_assertion(self):
         with tempfile.TemporaryDirectory() as temp:
             report=Path(temp)/'probe.json'
-            result=subprocess.run([sys.executable,str(ROOT/'Scripts/probe_acp.py'),
-                                   '--executable',str(ROOT/'Tests/Fixtures/vendor.py'),
+            result=subprocess.run([sys.executable,str(ROOT/'scripts/probe_acp.py'),
+                                   '--executable',str(ROOT/'tests/Fixtures/vendor.py'),
                                    '--output',str(report)],capture_output=True,text=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
             evidence=json.loads(report.read_text())

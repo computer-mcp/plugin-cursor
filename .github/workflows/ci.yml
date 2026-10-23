@@ -28,8 +28,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: |
-          python3 -m unittest discover -s Tests -p 'test_*.py'
-          python3 Scripts/build_package.py dist > package-receipt.json
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 scripts/build_package.py dist > package-receipt.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cursor-plugin-${{ github.sha }}-${{ matrix.python-version }}
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python3 Tests/check_runtime_rejection.py
+      - run: python3 tests/check_runtime_rejection.py
   runtime:
     uses: computer-mcp/github-workflows/.github/workflows/plugin-runtime.yml@d65bc20504f39c3a30232d67043abeca43d2c7b1
   validate:

@@ -12,7 +12,7 @@ import unittest
 import zipfile
 
 ROOT=Path(__file__).resolve().parent.parent
-spec=importlib.util.spec_from_file_location('build_package',ROOT/'Scripts/build_package.py')
+spec=importlib.util.spec_from_file_location('build_package',ROOT/'scripts/build_package.py')
 builder=importlib.util.module_from_spec(spec);spec.loader.exec_module(builder)
 
 class PackageTests(unittest.TestCase):

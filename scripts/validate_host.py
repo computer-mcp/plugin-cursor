@@ -18,7 +18,7 @@ import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / 'Tests'))
+sys.path.insert(0, str(ROOT / 'tests'))
 from support import Client
 
 
@@ -155,7 +155,7 @@ def validate(host, archive, output, expected_host_version, require_work_ownershi
                                + 'else:\n    print(json.dumps({"argv":sys.argv[1:],"stdin":sys.stdin.read()}))\n')
         cli_fixture.chmod(0o755)
         config = work / 'gateway.toml'
-        config.write_text(configuration(package, workspace, cli_fixture, ROOT / 'Tests/Fixtures/vendor.py', vendor))
+        config.write_text(configuration(package, workspace, cli_fixture, ROOT / 'tests/Fixtures/vendor.py', vendor))
         checked_config = capture([str(host), 'config', 'validate', '--config', str(config)], work, environment)
         (output / 'configuration-validation.txt').write_bytes(checked_config)
         client = Client(str(workspace), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
@@ -218,7 +218,7 @@ def validate(host, archive, output, expected_host_version, require_work_ownershi
         finally:
             client.close()
         checks['standalone_shutdown'] = 'passed'
-        config.write_text(configuration(package, workspace, cli_fixture, ROOT / 'Tests/Fixtures/vendor.py', vendor, readonly=True))
+        config.write_text(configuration(package, workspace, cli_fixture, ROOT / 'tests/Fixtures/vendor.py', vendor, readonly=True))
         client = Client(str(workspace), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
         try:
             readonly_tools = client.request('tools/list')['result']['tools']
@@ -227,7 +227,7 @@ def validate(host, archive, output, expected_host_version, require_work_ownershi
         finally:
             client.close()
         checks['read_only_profile'] = 'passed'
-        restricted = configuration(package, workspace, cli_fixture, ROOT / 'Tests/Fixtures/vendor.py', vendor)
+        restricted = configuration(package, workspace, cli_fixture, ROOT / 'tests/Fixtures/vendor.py', vendor)
         restricted = restricted.replace('mode = "local-full-access"', 'mode = "workspace-operations"')
         restricted = restricted.replace('full_shell_enabled = true', 'full_shell_enabled = false')
         execution_tool = 'cursor.acp.prompt'
