@@ -70,17 +70,17 @@ Use this check:
 
 - Before changing versions, dependencies, packaging or release workflows, read
   the [organization VERSIONING](https://github.com/computer-mcp/.github/blob/master/VERSIONING.md)
-  for version rules and `Documentation/Reference/Release.md` for release facts
+  for version rules and `docs/Reference/Release.md` for release facts
   and check entry points.
 
-- For repository-native documentation placement, read `Documentation/README.md`
+- For repository-native documentation placement, read `docs/README.md`
   before editing.
 - For current canonical structure, read
-  `Documentation/Architecture/README.md` and the relevant architecture files.
-- For design-in-progress, use `Documentation/Proposals/*` when that subtree is
+  `docs/Architecture/README.md` and the relevant architecture files.
+- For design-in-progress, use `docs/Proposals/*` when that subtree is
   present.
-- For change history, consult `Documentation/Decisions/*`,
-  `Documentation/Migrations/*`, and `Documentation/Archive/*` when those
+- For change history, consult `docs/Decisions/*`,
+  `docs/Migrations/*`, and `docs/Archive/*` when those
   subtrees are present.
 - For GitHub-facing collaboration files, use `.github/` and root governance
   files.
@@ -92,10 +92,10 @@ Use this check:
 - `AGENTS.md` is the agent guide: first-principles guardrails, task
   route, authority boundaries, and boundary guardrails.
 - `README`-class files index scope and placement.
-- `Documentation/Architecture/*` is current truth.
-- `Documentation/Proposals/*` is proposal space when that subtree is present.
-- `Documentation/Decisions/*`, `Documentation/Migrations/*`, and
-  `Documentation/Archive/*` are history when those subtrees are present.
+- `docs/Architecture/*` is current truth.
+- `docs/Proposals/*` is proposal space when that subtree is present.
+- `docs/Decisions/*`, `docs/Migrations/*`, and
+  `docs/Archive/*` are history when those subtrees are present.
 - `.github/*` is GitHub-facing governance.
 
 ## Boundary Guardrails
@@ -113,8 +113,8 @@ and operating guidance. Keep temporary implementation notes, local evidence,
 local paths, run-specific artifacts, and historical comparison notes out of
 README files, Reference docs, API docs, and bundled user-facing skills. Promote
 only accepted decision records into
-`Documentation/Decisions/*` and durable transition or cutover records into
-`Documentation/Migrations/*`.
+`docs/Decisions/*` and durable transition or cutover records into
+`docs/Migrations/*`.
 
 Use this decision test:
 
@@ -147,11 +147,11 @@ source of truth instead of a literal value.
 - Keep Agent Guide and Index separate.
 - Keep current truth out of proposal and history subtrees when they are
   present.
-- Keep GitHub collaboration configuration out of `Documentation/`.
+- Keep GitHub collaboration configuration out of `docs/`.
 
 ## Repository Guardrails
 
-Read `README.md`, `computer-mcp-plugin.toml`, and `Documentation/Reference/Interface.md` before editing.
+Read `README.md`, `computer-mcp-plugin.toml`, and `docs/Reference/Interface.md` before editing.
 
 Keep vendor installation, authentication, subscription usage, and updates outside this repository. The external Cursor Agent is a dependency, not bundled code. Do not run authenticated model prompts merely to validate package structure.
 
@@ -162,13 +162,3 @@ Keep vendor installation, authentication, subscription usage, and updates outsid
 Use Python standard library only unless a dependency demonstrably removes required complexity. Tests must cover MCP initialization, tool discovery, ACP framing, permission response, deterministic package contents, and executable archive mode.
 
 Before handoff run the unit tests, native non-model interface check, deterministic package build, Computer MCP package validation/doctor where available, and git status. Do not publish or create a release implicitly.
-
-## Brand delivery
-
-The organization `.github` repository owns the design system and renders every
-image; the main Computer MCP repository owns ProductIdentity. Imported
-`Documentation/Brand/header-light.png` and `header-dark.png` travel with the
-packaged manual; `.github/brand/social.png` supplies the repository preview.
-`.github/brand/brand.lock.json` binds them to the organization exports, and CI
-verifies it with the shared brand-check workflow. Update imports with the
-organization repository's `python3 Brand/brand.py sync`.

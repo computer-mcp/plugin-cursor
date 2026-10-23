@@ -16,11 +16,11 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: computer-mcp/.github/.github/workflows/plugin-release.yml@35766b350427ed900b456aa3c39098e97d9d3aa1 # master
+    uses: computer-mcp/github-workflows/.github/workflows/plugin-release.yml@d65bc20504f39c3a30232d67043abeca43d2c7b1
     with:
       ref: ${{ inputs.ref }}
       publish: ${{ inputs.publish }}
-      build: python3 Scripts/build_package.py
+      build: python3 scripts/build_package.py
       ci_artifact: cursor-plugin-${commit}-3.13
   notify-catalog:
     needs: release

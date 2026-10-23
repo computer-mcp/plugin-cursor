@@ -1,6 +1,6 @@
 # Package architecture
 
-The package is independently maintained and distributed. Computer MCP owns registration, authorization, workspace selection, CLI argument encoding and audit; this repository owns the Cursor CLI description and ACP-to-MCP translation. No host module, private database or optional Host Services callback is required.
+The package is independently maintained and distributed. Computer MCP owns registration, authorization, project selection, CLI argument encoding and audit; this repository owns the Cursor CLI description and ACP-to-MCP translation. No host module, private database or optional Host Services callback is required.
 
 `computer-mcp-plugin.toml` composes the file-backed CLI tree, the packaged stdio adapter and Skills. `cli-tree.json` is the sole native command/version description. Adapter request schemas remain vendor-specific rather than imposing an Agent framework on the host.
 

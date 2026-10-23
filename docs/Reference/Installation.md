@@ -10,7 +10,7 @@ Provide Python 3.13 or newer as `python3` on the environment PATH that launches 
 
 Install the ZIP through Computer MCP's plugin UI or owner CLI. Installation is not activation or a permission grant. Use `plugins list/show` to obtain the current revision and installation identity. Review `Examples/settings.json`, replace its placeholder paths, then configure the plugin through the same UI or `plugins configure` command. The CLI dependency binding selects the vendor for the CLI contribution; the MCP launch `args` independently supply `--executable` for the adapter. These two choices should normally point to the same verified installation.
 
-The example exposes this plugin's complete MCP tool catalog with no extra prefix. It is a host choice, not authorization embedded in the package. Authorize the desired tools/registration and workspace in the calling profile. Obtain projected CLI and MCP names from the actual host `tools/list`, rather than constructing names. `plugins doctor` checks files and configuration; an MCP connection check verifies initialization/catalog, not model execution.
+The example exposes this plugin's complete MCP tool catalog with no extra prefix. It is a host choice, not authorization embedded in the package. Authorize the desired tools/registration and project in the calling profile. Obtain projected CLI and MCP names from the actual host `tools/list`, rather than constructing names. `plugins doctor` checks files and configuration; an MCP connection check verifies initialization/catalog, not model execution.
 
 Computer MCP publishes plugin configuration changes to connected clients atomically. New calls use the current configuration; existing work keeps its owning runtime until release. Installation does not grant access, and later calls use current authorization.
 
@@ -19,9 +19,9 @@ No host binary replacement or host release is required. Do not restart the activ
 ## Build
 
 ```sh
-python3 -m unittest discover -s Tests -p 'test_*.py' -v
-python3 Scripts/validate_native.py --executable /absolute/path/to/agent
-python3 Scripts/build_package.py /new/output/directory
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 scripts/validate_native.py --executable /absolute/path/to/agent
+python3 scripts/build_package.py /new/output/directory
 ```
 
 The builder produces `cursor.zip` and prints an ID/version/SHA-256 receipt. Identical source bytes produce identical archive bytes. It refuses to overwrite a different existing artifact. The archive contains the manifest, canonical CLI tree, adapters, Skills, examples, manuals and notices. It excludes tests, build scripts, local evidence, caches and credentials. Only executable entrypoints receive executable mode.
@@ -33,7 +33,7 @@ CI runs deterministic fixture tests and packaging; it does not install a vendor 
 After packaging, validate the exact ZIP against the reviewed Computer MCP binary. Select its release version explicitly; a mismatch fails before package extraction:
 
 ```sh
-python3 Scripts/validate_host.py \
+python3 scripts/validate_host.py \
   --host "/absolute/path/to/candidate/computer-mcp" \
   --expected-host-version X.Y.Z \
   --archive /output/PLUGIN.zip \
@@ -53,7 +53,7 @@ gate without that option.
 A real ACP handshake can be checked independently, without authenticating, opening a conversation or invoking a model:
 
 ```sh
-python3 Scripts/probe_acp.py --executable /absolute/path/to/agent --output /output/acp-probe.json
+python3 scripts/probe_acp.py --executable /absolute/path/to/agent --output /output/acp-probe.json
 ```
 
 ## Result interpretation

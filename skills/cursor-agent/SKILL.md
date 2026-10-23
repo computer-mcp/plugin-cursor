@@ -5,7 +5,7 @@ description: Use this Computer MCP plugin's verified Cursor CLI and ACP session,
 
 # Cursor Agent
 
-Discover the host's actual tool names and schemas first. A host prefix may differ from the adapter-native names below. Select the authorized host workspace; the adapter must not invent another working directory or use private Host Services.
+Discover the host's actual tool names and schemas first. A host prefix may differ from the adapter-native names below. Select the authorized host project; the adapter must not invent another working directory or use private Host Services.
 
 Use the projected CLI print command for a single headless task or native model/resume options whose final JSON is sufficient. Read its explicit partial coverage. Do not inject force, trust, sandbox changes or MCP approvals unless the user explicitly requested those native choices. Omit one-way Boolean flags rather than supplying false.
 

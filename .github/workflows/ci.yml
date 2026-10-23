@@ -1,11 +1,15 @@
 name: CI
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
   push:
     branches: [master]
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   package:
     runs-on: macos-latest
@@ -24,8 +28,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: |
-          python3 -m unittest discover -s Tests -p 'test_*.py'
-          python3 Scripts/build_package.py dist > package-receipt.json
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 scripts/build_package.py dist > package-receipt.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: cursor-plugin-${{ github.sha }}-${{ matrix.python-version }}
@@ -46,8 +50,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python3 Tests/check_runtime_rejection.py
+      - run: python3 tests/check_runtime_rejection.py
   runtime:
-    uses: computer-mcp/.github/.github/workflows/plugin-runtime.yml@35766b350427ed900b456aa3c39098e97d9d3aa1 # master
-  brand:
-    uses: computer-mcp/.github/.github/workflows/brand-check.yml@f402911abcdfb87ef0c41a2759e8c51387b18935 # master
+    uses: computer-mcp/github-workflows/.github/workflows/plugin-runtime.yml@d65bc20504f39c3a30232d67043abeca43d2c7b1
+  validate:
+    if: always()
+    needs: [package, unsupported-runtime, runtime]
+    uses: computer-mcp/github-workflows/.github/workflows/result.yml@d65bc20504f39c3a30232d67043abeca43d2c7b1
+    with:
+      needs-json: ${{ toJSON(needs) }}

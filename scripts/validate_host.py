@@ -18,7 +18,7 @@ import time
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / 'Tests'))
+sys.path.insert(0, str(ROOT / 'tests'))
 from support import Client
 
 
@@ -57,7 +57,7 @@ def wait_for(callback, predicate, seconds=15):
     raise AssertionError('Isolated execution did not reach its postcondition')
 
 
-def configuration(package, workspace, cli_fixture, acp_fixture, vendor, readonly=False):
+def configuration(package, project, cli_fixture, acp_fixture, vendor, readonly=False):
     quote = json.dumps
     return f'''schema_version = 1
 [server]
@@ -65,7 +65,7 @@ name = "plugin-contract-validation"
 [runtime]
 caller = "local-mcp"
 profile = "validation"
-workspace_id = "primary"
+project_id = "primary"
 [policy]
 default_timeout_ms = 15000
 max_output_bytes = 1048576
@@ -75,13 +75,13 @@ id = "validation"
 mode = "{'read-only' if readonly else 'local-full-access'}"
 confirmation_policy = "never"
 capabilities = ["*"]
-workspaces = ["primary"]
+projects = ["primary"]
 allowed_callers = ["local-mcp"]
 full_shell_enabled = {'false' if readonly else 'true'}
-[[workspaces]]
+[[projects]]
 id = "primary"
-display_name = "Isolated fixture workspace"
-path = {quote(str(workspace))}
+display_name = "Isolated fixture project"
+path = {quote(str(project))}
 [[cli.commands]]
 id = "fixture-cli"
 executable = {quote(str(cli_fixture))}
@@ -145,8 +145,8 @@ def validate(host, archive, output, expected_host_version, require_work_ownershi
         checks['archive_and_manifest'] = 'passed'
         require(not list(package.rglob('*.pyc')) and not list(package.rglob('__pycache__')), 'Archive contains Python cache')
 
-        workspace = work / 'workspace'
-        workspace.mkdir()
+        project = work / 'project'
+        project.mkdir()
         version_file = work / 'version.txt'
         version_file.write_text(expected_version)
         cli_fixture = work / 'native-cli-fixture'
@@ -155,10 +155,10 @@ def validate(host, archive, output, expected_host_version, require_work_ownershi
                                + 'else:\n    print(json.dumps({"argv":sys.argv[1:],"stdin":sys.stdin.read()}))\n')
         cli_fixture.chmod(0o755)
         config = work / 'gateway.toml'
-        config.write_text(configuration(package, workspace, cli_fixture, ROOT / 'Tests/Fixtures/vendor.py', vendor))
+        config.write_text(configuration(package, project, cli_fixture, ROOT / 'tests/Fixtures/vendor.py', vendor))
         checked_config = capture([str(host), 'config', 'validate', '--config', str(config)], work, environment)
         (output / 'configuration-validation.txt').write_bytes(checked_config)
-        client = Client(str(workspace), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
+        client = Client(str(project), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
         try:
             catalog = client.request('tools/list')['result']['tools']
             (output / 'catalog.json').write_text(json.dumps(catalog, indent=2)+'\n')
@@ -218,8 +218,8 @@ def validate(host, archive, output, expected_host_version, require_work_ownershi
         finally:
             client.close()
         checks['standalone_shutdown'] = 'passed'
-        config.write_text(configuration(package, workspace, cli_fixture, ROOT / 'Tests/Fixtures/vendor.py', vendor, readonly=True))
-        client = Client(str(workspace), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
+        config.write_text(configuration(package, project, cli_fixture, ROOT / 'tests/Fixtures/vendor.py', vendor, readonly=True))
+        client = Client(str(project), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
         try:
             readonly_tools = client.request('tools/list')['result']['tools']
             require(not any(tool.get('_meta',{}).get('cli') for tool in readonly_tools), 'Read-only profile exposed arbitrary CLI execution')
@@ -227,14 +227,14 @@ def validate(host, archive, output, expected_host_version, require_work_ownershi
         finally:
             client.close()
         checks['read_only_profile'] = 'passed'
-        restricted = configuration(package, workspace, cli_fixture, ROOT / 'Tests/Fixtures/vendor.py', vendor)
-        restricted = restricted.replace('mode = "local-full-access"', 'mode = "workspace-operations"')
+        restricted = configuration(package, project, cli_fixture, ROOT / 'tests/Fixtures/vendor.py', vendor)
+        restricted = restricted.replace('mode = "local-full-access"', 'mode = "project-operations"')
         restricted = restricted.replace('full_shell_enabled = true', 'full_shell_enabled = false')
         execution_tool = 'cursor.acp.prompt'
         # An explicit low host risk must not bypass the publisher's execution floor.
         restricted += '\n[mcp.servers.tool_risks]\n' + json.dumps(execution_tool) + ' = "read-only"\n'
         config.write_text(restricted)
-        client = Client(str(workspace), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
+        client = Client(str(project), environment, [str(host), 'serve', 'stdio', '--config', str(config)])
         try:
             tools = client.request('tools/list')['result']['tools']
             require(execution_tool not in {tool['name'] for tool in tools}, 'Restricted profile exposed arbitrary vendor execution')
