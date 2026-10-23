@@ -162,13 +162,3 @@ Keep vendor installation, authentication, subscription usage, and updates outsid
 Use Python standard library only unless a dependency demonstrably removes required complexity. Tests must cover MCP initialization, tool discovery, ACP framing, permission response, deterministic package contents, and executable archive mode.
 
 Before handoff run the unit tests, native non-model interface check, deterministic package build, Computer MCP package validation/doctor where available, and git status. Do not publish or create a release implicitly.
-
-## Brand delivery
-
-The organization `.github` repository owns the design system and renders every
-image; the main Computer MCP repository owns ProductIdentity. Imported
-`Documentation/Brand/header-light.png` and `header-dark.png` travel with the
-packaged manual; `.github/brand/social.png` supplies the repository preview.
-`.github/brand/brand.lock.json` binds them to the organization exports, and CI
-verifies it with the shared brand-check workflow. Update imports with the
-organization repository's `python3 Brand/brand.py sync`.
