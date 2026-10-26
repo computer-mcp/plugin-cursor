@@ -11,10 +11,10 @@
         "source" : "."
       },
       {
-        "hash" : "sha256:fd62d32e87fffe411d4ddd1b6b479bb5cb90cafacf0b0b359920a2ac6b52db87",
+        "hash" : "sha256:d0c9d33c22d7357951d792c5c2377b392e0cdf6bd8470159e4d2930cdcee3550",
         "name" : "shared/plugin-rules",
         "path" : ".agent/instructions/shared/plugin-rules.md",
-        "revision" : "0c2531e982509bf6aee719cb7398819f64a5f966",
+        "revision" : "ad4901bf01abb22ae655943d48b50483bf4c6b3a",
         "source" : "github.com/computer-mcp/.github"
       }
     ],
@@ -24,7 +24,7 @@
           "claude-code",
           "codex"
         ],
-        "blockHash" : "sha256:b112bcf3977bcc37205dbf978bc1fa1c523e094cc3e6d55edfa32209f5154861",
+        "blockHash" : "sha256:6af8428baa1d69ac1287cf33416d58f4e6a498a6fe7bd08c8abf721f25f1c946",
         "created" : false,
         "headingOffset" : 0
       }
@@ -38,7 +38,7 @@
       "kind" : "git",
       "path" : ".agent",
       "requirement" : {
-        "revision" : "0c2531e982509bf6aee719cb7398819f64a5f966"
+        "revision" : "ad4901bf01abb22ae655943d48b50483bf4c6b3a"
       },
       "url" : "https://github.com/computer-mcp/.github"
     }
