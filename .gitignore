@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 dist/
 .DS_Store
-.agent/
 .ruff_cache/
 package-receipt.json
+/.agent/*
+!/.agent/instructions/
+!/.agent/agents.json
+!/.agent/agents.resolved
