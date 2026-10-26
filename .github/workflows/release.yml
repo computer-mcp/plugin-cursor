@@ -16,7 +16,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-    uses: computer-mcp/github-workflows/.github/workflows/plugin-release.yml@36a8e11e46fc8831397cebab54cd4657dcac7898
+    uses: computer-mcp/github-workflows/.github/workflows/plugin-release.yml@fd25fcface41732fda099017c6945912366fc7c1
     with:
       ref: ${{ inputs.ref }}
       publish: ${{ inputs.publish }}
