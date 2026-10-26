@@ -52,10 +52,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python3 tests/check_runtime_rejection.py
   runtime:
-    uses: computer-mcp/github-workflows/.github/workflows/plugin-runtime.yml@4359ca27a4637460ba8d3f6461e42701f76f647a
+    uses: computer-mcp/github-workflows/.github/workflows/plugin-runtime.yml@36a8e11e46fc8831397cebab54cd4657dcac7898
   validate:
     if: always()
     needs: [package, unsupported-runtime, runtime]
-    uses: computer-mcp/github-workflows/.github/workflows/result.yml@4359ca27a4637460ba8d3f6461e42701f76f647a
+    uses: computer-mcp/github-workflows/.github/workflows/result.yml@36a8e11e46fc8831397cebab54cd4657dcac7898
     with:
       needs-json: ${{ toJSON(needs) }}
