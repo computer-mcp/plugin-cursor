@@ -36,6 +36,29 @@ class HostSourceTests(unittest.TestCase):
         for patch in ({'tests_executed': 0}, {'tests_executed': True}, {'run_id': 'stale'}, {'cases': []}, {'cases': good['cases'] + good['cases'][:1]}):
             with self.assertRaises(ValueError): driver.validate_evidence(dict(good, **patch), 'fresh')
 
+    def test_acquisition_receipt_requires_durable_distinct_launches(self):
+        def identifier(number):
+            return f"00000000-0000-0000-0000-{number:012X}"
+
+        def acquisition(offset):
+            return {
+                "execution": identifier(offset),
+                "authorization_ids": [identifier(offset + 1), identifier(offset + 2)],
+                "adapter_child": identifier(1), "adapter_pid": 11, "adapter_identity": "101",
+                "probe_child": identifier(offset + 3), "probe_pid": 12,
+                "probe_identity": str(offset + 100),
+                "workload_child": identifier(offset + 4), "workload_pid": offset + 100,
+                "workload_identity": str(offset + 200),
+            }
+
+        cold, warm = acquisition(10), acquisition(20)
+        driver.validate_acquisitions([cold, warm])
+        for field, value in (("workload_identity", None), ("adapter_identity", "102"),
+                             ("probe_child", cold["probe_child"]),
+                             ("probe_identity", cold["probe_identity"])):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                driver.validate_acquisitions([cold, dict(warm, **{field: value})])
+
     def test_source_identity_and_dirt_are_rejected(self):
         sha = 'a' * 40
         with patch.object(driver, 'git', side_effect=[str(ROOT), sha, '']):

@@ -174,6 +174,39 @@ def validate_evidence(observed, run_id, expected_cases=CASES):
         raise ValueError("Consumer case evidence is incomplete, duplicated or stale")
 
 
+def validate_acquisitions(rows):
+    if not isinstance(rows, list) or len(rows) != 2 or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("Host did not record the cold and warm Cursor acquisitions")
+
+    def root(row, phase):
+        pid = row.get(f"{phase}_pid")
+        identity = row.get(f"{phase}_identity")
+        if (type(pid) is not int or pid <= 0 or not isinstance(identity, str)
+                or not re.fullmatch(r"[1-9][0-9]{0,19}", identity)):
+            raise ValueError("Cursor acquisition is missing a durable process identity")
+        return pid, identity
+
+    cold, warm = rows
+    adapter = root(cold, "adapter")
+    if root(warm, "adapter") != adapter or warm.get("adapter_child") != cold.get("adapter_child"):
+        raise ValueError("Warm Cursor acquisition did not reuse the cold adapter")
+    roots = [adapter]
+    ids = [cold.get("adapter_child")]
+    for row in rows:
+        proofs = row.get("authorization_ids")
+        if not isinstance(proofs, list) or len(proofs) != 2:
+            raise ValueError("Cursor acquisition is missing caller or provider authority")
+        ids.extend([row.get("execution"), *proofs])
+        for phase in ("probe", "workload"):
+            roots.append(root(row, phase))
+            ids.append(row.get(f"{phase}_child"))
+    if (len(set(roots)) != len(roots)
+            or any(not isinstance(value, str) or not re.fullmatch(
+                r"[0-9A-F]{8}-(?:[0-9A-F]{4}-){3}[0-9A-F]{12}", value) for value in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError("Cursor acquisitions reused a launch, child, execution, or authorization")
+
+
 def validate_startup_cancellation(evidence):
     if not isinstance(evidence, dict):
         raise ValueError("Host did not record startup cancellation")
@@ -284,8 +317,7 @@ def run(args):
         validate_evidence(observed, run_id, VENDOR_CASES if suite == "vendor-stop" else CASES)
         if suite == "vendor-stop":
             acquisitions = observed.get("acquisitions")
-            if not isinstance(acquisitions, list) or len(acquisitions) != 2:
-                raise ValueError("Host did not record the two acquired vendor workloads")
+            validate_acquisitions(acquisitions)
             result["acquisitions"] = acquisitions
             result["startup_cancellation"] = observed.get("startup_cancellation")
             validate_startup_cancellation(result["startup_cancellation"])

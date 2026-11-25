@@ -1,3 +1,4 @@
+import ComputerMCPDarwinTestSupport
 import ComputerMCPMacOS
 import ComputerMCPPermissions
 import ComputerMCPSandbox
@@ -31,13 +32,15 @@ struct CursorSourceIntegrationTests {
     for (caller, provider) in [(1, true), (2, false)] {
       try await withCursor(package, caller: caller, provider: provider) { h in
         try await h.discover()
-        let before = h.base.observations.members.count
+        let before = h.mcpObservations.members.count
+        let hostBefore = h.base.observations.members.count
         let denied = try await h.call("cursor.acp.session.open")
         try cursorDenied(denied)
         try #require(
           denied.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]
             == .string("permission.required"))
-        try #require(h.base.observations.members.count == before)
+        try #require(h.mcpObservations.members.count == before)
+        try #require(h.base.observations.members.count == hostBefore)
         print(
           "Cursor gate denial preserved (caller write: \(caller == 2), provider write: \(provider))"
         )
@@ -47,21 +50,29 @@ struct CursorSourceIntegrationTests {
     var measured: [[String: Any]] = []
     try await withCursor(package) { h in
       try await h.discover()
-      let baseline = h.base.observations.members.count
+      let baseline = h.mcpObservations.members.count
+      let hostBaseline = h.base.observations.members.count
       let a = try await h.open()
-      let warm = h.base.observations.members.count
+      let warm = h.mcpObservations.members.count
       let b = try await h.open()
       let peers = try h.vendorEffects()
       try #require(
         peers.compactMap { $0["phase"]?.stringValue } == ["probe", "workload", "probe", "workload"])
       let roots = try peers.map { try h.peerMember($0) }
-      let launches = Array(h.base.observations.members.dropFirst(baseline))
-      try #require(Set(launches.suffix(from: warm - baseline)) == Set(roots.suffix(2)))
-      let adapter = try #require(Set(launches).subtracting(roots).first)
-      try #require(Set(launches) == Set(roots + [adapter]))
-      try #require(launches.count == 5)
-      measured = try h.verifyAcquisitions(
-        first: Array(roots.prefix(2)), second: Array(roots.suffix(2)), adapter: adapter)
+      try #require(Set(roots).count == 4)
+      let coldRoots = Array(roots.prefix(2))
+      let warmRoots = Array(roots.suffix(2))
+      let coldLaunches = Array(
+        h.mcpObservations.members.dropFirst(baseline).prefix(warm - baseline))
+      let adapterCandidates = Set(coldLaunches).subtracting(coldRoots)
+      try #require(adapterCandidates.count == 1)
+      let adapter = try #require(adapterCandidates.first)
+      try h.requireMCPLaunches(coldLaunches, exactly: coldRoots + [adapter])
+      try h.requireMCPLaunches(since: warm, exactly: warmRoots)
+      measured = try h.verifyAcquisitions(first: coldRoots, second: warmRoots, adapter: adapter)
+      print(
+        "Cursor cold/warm proof counted five MCP roots and \(h.base.observations.members.count - hostBaseline) separate Host launches"
+      )
       let aRoot = roots[1]
       let bRoot = roots[3]
       let aPID = aRoot.processID
@@ -172,9 +183,7 @@ struct CursorSourceIntegrationTests {
         "A settled; A members \(aMembers.map(\.processID)), B members \(bMembers.map(\.processID))",
         started: isolationStarted)
       if !siblingAlive {
-        let adapterOwner = h.base.observations.ownerships.first {
-          (try? $0.recoveryState().root.processID) == adapter.processID
-        }
+        let adapterOwner = try? h.processOwner(adapter)
         let adapterMembers = try? await adapterOwner?.members()
         h.reportIsolation(
           "adapter members \(adapterMembers?.map(\.processID) ?? [])",
@@ -222,7 +231,7 @@ struct CursorSourceIntegrationTests {
           $0["pid"]?.intValue == Int(bPID) && $0["phase"]?.stringValue == "cancel"
         }.count == 1)
       try #require(try h.nativeStarts == 2)
-      try #require(h.base.observations.members.count == baseline + launches.count)
+      try h.requireMCPLaunches(since: baseline, exactly: roots + [adapter])
       _ = try cursorValue(
         try await h.call("cursor.acp.session.close", ["session": .string(b)]))
       try #require(try await bOwner.members().isEmpty)
@@ -266,7 +275,7 @@ struct CursorSourceIntegrationTests {
         let bNative = try #require(
           try h.vendorTurn(pid: bRoot.processID, prompt: bPrompt).first?["acp_id"])
         let requestID = withdraw ? "startup-withdraw" : "startup-control"
-        let before = h.base.observations.members.count
+        let before = h.mcpObservations.members.count
         let startCount = try h.nativeStarts
         try h.armStartupFault("hold-launch")
         let started = try await h.startOpen(requestID)
@@ -277,7 +286,7 @@ struct CursorSourceIntegrationTests {
         let probeRoot = try #require(beforeStop.probe.recovery?.root)
         try #require(beforeStop.probe.completed && beforeStop.probe.recovery?.sandboxed == true)
         try #require(!beforeStop.workload.completed && beforeStop.workload.recovery == nil)
-        try #require(Array(h.base.observations.members.dropFirst(before)) == [probeRoot])
+        try h.requireMCPLaunches(since: before, exactly: [probeRoot])
         try h.requirePeerEvidence(probeRoot, phase: "probe")
 
         var trial = h.startupEvidence(boundary, requestID: requestID, downstream: downstream)
@@ -308,7 +317,7 @@ struct CursorSourceIntegrationTests {
           let payload = reply.objectValue?["structuredContent"]?.objectValue?["result"]
           try #require(payload?.objectValue?["error"]?.objectValue?["code"] == .string("cancelled"))
           try await h.requireNeverLaunched(boundary, probe: probeRoot)
-          try #require(Array(h.base.observations.members.dropFirst(before)) == [probeRoot])
+          try h.requireMCPLaunches(since: before, exactly: [probeRoot])
           try #require(try h.nativeStarts == startCount)
           trial["workload_state"] = "never_dispatched"
           trial["workload_starts"] = 0
@@ -325,7 +334,7 @@ struct CursorSourceIntegrationTests {
           let live = try h.startupChildren(boundary)
           let root = try #require(live.workload.recovery?.root)
           try #require(!live.workload.completed && live.workload.recovery?.sandboxed == true)
-          try #require(Array(h.base.observations.members.dropFirst(before)) == [probeRoot, root])
+          try h.requireMCPLaunches(since: before, exactly: [probeRoot, root])
           try h.requirePeerEvidence(root, phase: "workload")
           try #require(try h.nativeStarts == startCount + 1)
           _ = try cursorValue(
@@ -371,7 +380,7 @@ struct CursorSourceIntegrationTests {
       try await h.discover()
       let b = try await h.open()
       let bRoot = try h.lastWorkload()
-      let before = h.base.observations.members.count
+      let before = h.mcpObservations.members.count
       try h.armStartupFault("lose-reply")
       let requestID = "startup-lost-reply"
       let started = try await h.startOpen(requestID)
@@ -437,7 +446,7 @@ struct CursorSourceIntegrationTests {
       try #require(repeated["result"] == reply && repeated["replayed"] == .bool(false))
       try h.requireNoTransportEvent("launch-replayed")
       _ = try await h.verifySiblingIO(b, root: bRoot, suffix: "after-lost-launch-reply")
-      try #require(Array(h.base.observations.members.dropFirst(before)) == [probe, root])
+      try h.requireMCPLaunches(since: before, exactly: [probe, root])
       let starts = try h.vendorEffects().filter { $0["phase"] == .string("workload") }
       try #require(
         starts.compactMap { $0["pid"]?.intValue } == [Int(bRoot.processID), Int(root.processID)])
@@ -464,7 +473,7 @@ struct CursorSourceIntegrationTests {
         _ = try await h.open()
         let sibling = try h.lastWorkload()
         let siblingOwner = try h.processOwner(sibling)
-        let before = h.base.observations.members.count
+        let before = h.mcpObservations.members.count
         try h.armStartupFault(dispatched ? "hold-launch-reply" : "hold-launch")
         let requestID =
           dispatched ? "startup-close-after-dispatch" : "startup-close-before-dispatch"
@@ -517,7 +526,7 @@ struct CursorSourceIntegrationTests {
         try #require(try await siblingOwner.members().isEmpty)
         let adapter = try h.processOwner(boundary.adapter)
         try #require(try await adapter.members().isEmpty)
-        try #require(Array(h.base.observations.members.dropFirst(before)) == roots)
+        try h.requireMCPLaunches(since: before, exactly: roots)
         let terminal = try await h.waitRequestReceipt(requestID)
         try #require(terminal["state"] == .string("outcome_unknown"))
         try #require(terminal["cleanup"] == .string("confirmed"))
@@ -723,7 +732,7 @@ struct CursorSourceIntegrationTests {
       try #require(cancelled["is_error"] == .bool(true))
       try #require(try h.nativeStarts == nativeStarts)
       // Client B uses a separate authority and kill domain in the same provider container.
-      let firstOwnerships = h.base.observations.ownerships
+      let firstOwnerships = h.mcpObservations.ownerships
       var retained = false
       for ownership in firstOwnerships {
         if try await ownership.members().isEmpty == false { retained = true }
@@ -850,6 +859,9 @@ private struct CursorTransportEvent: Decodable {
 
 private final class CursorHarness: @unchecked Sendable {
   let base: FixedHostFixture
+  // The real proxy's launcher observes adapter and vendor starts independently
+  // of the platform launcher used for Host Git and CLI work.
+  let mcpObservations = ExecutionObservations()
   let lifecycle: GatewayStandaloneGenerations
   let package: PluginPackage
   let plugin: ResolvedPlugin
@@ -1045,6 +1057,7 @@ private final class CursorHarness: @unchecked Sendable {
       try #require(
         base.database.profiles().first { $0.id == lifecycleProfile.id } == lifecycleProfile)
       try #require(base.observations.members.count == beforeSettings)
+      try #require(h.mcpObservations.members.isEmpty)
       if origin.kind == .development {
         try #require(beforeSettings == beforeRegistration)
       }
@@ -1115,7 +1128,9 @@ private final class CursorHarness: @unchecked Sendable {
       context: .init(
         caller: .localMCP, profileID: id, projectID: projectID, trustedPrincipalID: name),
       database: base.database, registeredProjects: base.database.projects(),
-      platform: base.platform, plugins: [plugin], bundledPlugins: .init(packages: [], issues: []))
+      platform: base.platform,
+      mcpClient: MCPProxyClient(launcher: testExecutionLauncher(observations: mcpObservations)),
+      plugins: [plugin], bundledPlugins: .init(packages: [], issues: []))
     _ = try gateway.makeControlSession()
     return gateway
   }
@@ -1125,10 +1140,11 @@ private final class CursorHarness: @unchecked Sendable {
       context: .empty)
   }
   func discover(gateway selected: GatewayRuntime? = nil) async throws {
-    let firstOwnership = base.observations.ownerships.count
+    let firstOwnership = mcpObservations.ownerships.count
     let result = try await catalog(gateway: selected)
     if result.objectValue?["isError"] == .bool(true) {
-      await reportLaunchFailure(since: firstOwnership, operation: "discovery")
+      await reportLaunchFailure(
+        mcpObservations.ownerships.dropFirst(firstOwnership), operation: "discovery")
     }
     try #require(result.objectValue?["isError"] != .bool(true), "\(result)")
     let tools = try #require(
@@ -1141,7 +1157,9 @@ private final class CursorHarness: @unchecked Sendable {
     let result = try await gateway.callToolForMCPAsync(
       name: name, arguments: .object(["prompt": .string(prompt)]), context: .empty)
     if result.objectValue?["isError"] == .bool(true) {
-      await reportLaunchFailure(since: firstOwnership, operation: "CLI compatibility/target")
+      await reportLaunchFailure(
+        base.observations.ownerships.dropFirst(firstOwnership),
+        operation: "CLI compatibility/target")
       let home = try base.database.prepareProviderContainer(.package("cursor")).sandbox.home
       let diagnostic = URL(fileURLWithPath: home.value).appendingPathComponent(
         "cursor-peer-failure.json")
@@ -1157,8 +1175,10 @@ private final class CursorHarness: @unchecked Sendable {
     }
     return result
   }
-  func reportLaunchFailure(since firstOwnership: Int, operation: String) async {
-    for ownership in base.observations.ownerships.dropFirst(firstOwnership) {
+  func reportLaunchFailure(
+    _ ownerships: ArraySlice<any ExecutionOwnership>, operation: String
+  ) async {
+    for ownership in ownerships {
       do {
         let exit = try await ownership.wait(until: .now.advanced(by: .milliseconds(250)))
         print(
@@ -1195,12 +1215,24 @@ private final class CursorHarness: @unchecked Sendable {
         arguments: .object(["server": .string("cursor-fixture"), "request_id": .string(id)]),
         context: .empty))
   }
+  func requireMCPLaunches(since index: Int, exactly expected: [ExecutionMember]) throws {
+    try requireMCPLaunches(Array(mcpObservations.members.dropFirst(index)), exactly: expected)
+  }
+
+  func requireMCPLaunches(_ observed: [ExecutionMember], exactly expected: [ExecutionMember]) throws
+  {
+    try #require(observed.count == expected.count)
+    try #require(Set(observed) == Set(expected))
+  }
+
   func processOwner(_ member: ExecutionMember) throws -> any ExecutionOwnership {
-    try #require(base.observations.ownerships.first { (try? $0.recoveryState().root) == member })
+    let matches = mcpObservations.ownerships.filter { (try? $0.recoveryState().root) == member }
+    try #require(matches.count == 1)
+    return try #require(matches.first)
   }
 
   func processMember(pid: Int32) throws -> ExecutionMember {
-    let matches = base.observations.members.filter { $0.processID == pid }
+    let matches = mcpObservations.members.filter { $0.processID == pid }
     try #require(matches.count == 1)
     return try #require(matches.first)
   }
@@ -1384,11 +1416,15 @@ private final class CursorHarness: @unchecked Sendable {
   func phaseJournal(_ child: UUID, boundary: CursorStartupBoundary) throws
     -> ExecutionRecoveryJournal.Entry
   {
+    try phaseJournal(child, execution: boundary.executionID)
+  }
+
+  func phaseJournal(_ child: UUID, execution: UUID) throws -> ExecutionRecoveryJournal.Entry {
     let path = base.database.permissionExecutionRoot.appendingPathComponent("ownership")
       .appendingPathComponent(child.uuidString + ".json")
     let entry = try JSONDecoder().decode(
       ExecutionRecoveryJournal.Entry.self, from: Data(contentsOf: path))
-    try #require(entry.child == child && entry.execution == boundary.executionID)
+    try #require(entry.child == child && entry.execution == execution)
     try #require(entry.recovery.sandboxed)
     return entry
   }
@@ -1606,7 +1642,7 @@ private final class CursorHarness: @unchecked Sendable {
       var proofs: Set<UUID> = []
       var children: Set<UUID> = []
       for pair in [first, second] {
-        let pids = Set(pair)
+        let roots = Set(pair)
         var matched = false
         for execution in ledger.executions.values where execution.delegatedTo == .package("cursor")
         {
@@ -1614,7 +1650,7 @@ private final class CursorHarness: @unchecked Sendable {
             continue
           }
           let slots = record.children.filter { _, record in
-            record.recovery.map { pids.contains($0.root) } ?? false
+            record.recovery.map { roots.contains($0.root) } ?? false
           }
           guard slots.count == 2 else { continue }
           let newExecution = executions.insert(execution.id).inserted
@@ -1629,37 +1665,50 @@ private final class CursorHarness: @unchecked Sendable {
             let newChild = children.insert(id).inserted
             try #require(newChild)
           }
-          if rows.isEmpty {
-            try #require(
-              record.children.values.count == 3
-                && record.children.values.contains {
-                  $0.recovery?.root == adapter && $0.recovery?.sandboxed == true
-                })
-          } else {
-            try #require(record.children.count == 2)
-          }
-          let phaseIDs = try pair.map { root in
-            let pair = try #require(slots.first { $0.value.recovery?.root == root })
-            try #require(pair.value.recovery?.sandboxed == true)
-            return pair.key
-          }
-          try #require(slots[phaseIDs[0]]?.completed == true)
-          try #require(slots[phaseIDs[1]]?.completed == false)
-          rows.append([
+          var row: [String: Any] = [
             "execution": execution.id.uuidString,
             "authorization_ids": execution.authorizationIDs.map(\.uuidString).sorted(),
             "adapter_pid": adapter.processID,
-            "probe_pid": pair[0].processID,
-            "probe_child": phaseIDs[0].uuidString,
-            "workload_pid": pair[1].processID,
-            "workload_child": phaseIDs[1].uuidString,
-          ])
+            "adapter_identity": String(adapter.identity),
+          ]
+          if rows.isEmpty {
+            try #require(record.children.count == 3)
+            let adapterSlot = try #require(
+              record.children.first { $0.value.recovery?.root == adapter })
+            let inserted = children.insert(adapterSlot.key).inserted
+            try #require(inserted)
+            try verifyDurableLaunch(adapterSlot.key, in: record, root: adapter, completed: false)
+            row["adapter_child"] = adapterSlot.key.uuidString
+          } else {
+            try #require(record.children.count == 2)
+            row["adapter_child"] = rows[0]["adapter_child"]
+          }
+          for (phase, root) in zip(["probe", "workload"], pair) {
+            let slot = try #require(slots.first { $0.value.recovery?.root == root })
+            try verifyDurableLaunch(slot.key, in: record, root: root, completed: phase == "probe")
+            row[phase + "_child"] = slot.key.uuidString
+            row[phase + "_pid"] = root.processID
+            row[phase + "_identity"] = String(root.identity)
+          }
+          rows.append(row)
         }
         try #require(matched)
       }
       return rows
     }
   }
+  private func verifyDurableLaunch(
+    _ child: UUID, in record: ExecutionRuntimeRecord, root: ExecutionMember, completed: Bool
+  ) throws {
+    let slot = try #require(record.children[child])
+    try #require(slot.recovery?.root == root && slot.recovery?.sandboxed == true)
+    try #require(slot.completed == completed)
+    let entry = try phaseJournal(child, execution: record.id)
+    try #require(entry.owner == record.ownerID && entry.boot == record.boot)
+    try #require(entry.recovery.root == root && entry.completed == completed)
+    _ = try processOwner(root)
+  }
+
   func waitPending(_ session: String) async throws -> [String: JSONValue] {
     for _ in 0..<200 {
       let value = try cursorValue(
@@ -1708,7 +1757,7 @@ private final class CursorHarness: @unchecked Sendable {
     for _ in 0..<200 {
       try await (gateway ?? base.runtime).permissionRuntime.coordinator.reconcile()
       var live = false
-      for ownership in base.observations.ownerships {
+      for ownership in base.observations.ownerships + mcpObservations.ownerships {
         if try await ownership.members().isEmpty == false { live = true }
       }
       if !live { return }
