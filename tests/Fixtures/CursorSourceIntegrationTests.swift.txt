@@ -765,46 +765,61 @@ struct CursorSourceIntegrationTests {
         expectingCancellation: true)
       try #require(cancelled["closed"] == .bool(false))
       try #require(try h.nativeStarts == nativeStarts)
+      let aRoot = try h.lastWorkload()
+      let aExecutions = try h.sourceWorktreeExecutions(since: 0, profileID: h.consumerID)
+      let aExecution = try #require(aExecutions[aRoot])
+
       // Client B uses a separate authority and kill domain in the same provider container.
-      let firstOwnerships = h.mcpObservations.ownerships
-      var retained = false
-      for ownership in firstOwnerships {
-        if try await ownership.members().isEmpty == false { retained = true }
-      }
-      try #require(retained)
-      let second = try h.makeConsumer("cursor-second", caller: 2, use: true)
+      let beforeB = h.mcpObservations.members.count
+      let secondID = try #require(GatewayProfileID(rawValue: "cursor-second"))
+      let second = try h.makeConsumer(secondID.rawValue, caller: 2, use: true)
       h.other = second
       try await h.discover(gateway: second)
       let secondSession = try await h.open(gateway: second)
+      let bRoute = try await h.observeSession(secondSession, gateway: second)
+      let bRoot = try h.lastWorkload()
+      let bExecutions = try h.sourceWorktreeExecutions(since: beforeB, profileID: secondID)
+      let bExecution = try #require(bExecutions[bRoot])
+      try #require(aRoot != bRoot && aExecution != bExecution)
+      let bOwner = try h.processOwner(bRoot)
+      try #require(try await h.processOwner(aRoot).members().contains(aRoot))
+      try #require(try await bOwner.members().contains(bRoot))
+      try #require(try h.nativeStarts == 2)
+      print(
+        "Cursor revocation workloads A=\(aRoot) execution=\(aExecution)"
+          + " B=\(bRoot) execution=\(bExecution)")
+
       let service = h.gateway.permissionRuntime.service
-      _ = try service.revokePermission(
+      let revocation = try service.revokePermission(
         .plugin("cursor"), profileID: h.consumerID, owner: h.owner,
         expectedRevision: service.view(owner: h.owner).revision)
+      try #require(revocation.executionsToTerminate.contains(aExecution))
+      try #require(!revocation.executionsToTerminate.contains(bExecution))
       try await h.gateway.permissionRuntime.coordinator.reconcile()
       try cursorDenied(
         try await h.call(
           "cursor.acp.session.prompt",
           ["session": .string(session), "prompt": .string("must not run")]))
-      _ = try cursorValue(
+      try await h.requireWorktreeRootsJoined(Array(aExecutions.keys))
+      let siblingPrompt = "hello after Cursor A revocation"
+      let sibling = try cursorValue(
         try await h.call(
           "cursor.acp.session.prompt",
-          ["session": .string(secondSession), "prompt": .string("hello")], gateway: second))
-      for _ in 0..<200 {
-        var live = false
-        for ownership in firstOwnerships {
-          if try await ownership.members().isEmpty == false { live = true }
-        }
-        if !live { break }
-        try await Task.sleep(for: .milliseconds(10))
-      }
-      for ownership in firstOwnerships { try #require(try await ownership.members().isEmpty) }
+          ["session": .string(secondSession), "prompt": .string(siblingPrompt)], gateway: second))
+      try #require(sibling["session"] == .string(secondSession))
+      try #require(sibling["stop_reason"] == .string("end_turn"))
+      try #require(try h.vendorTurn(pid: bRoot.processID, prompt: siblingPrompt).count == 1)
+      try #require(try await bOwner.members().contains(bRoot))
+      try #require(try await h.observeSession(secondSession, gateway: second) == bRoute)
+
       // Removal is performed by the host while B still owns a live native session.
+      let remainingExecutions = try h.sourceWorktreeExecutions(since: beforeB, profileID: secondID)
       try await h.removeWorktree()
       try cursorDenied(
         try await h.call(
           "cursor.acp.session.prompt",
           ["session": .string(secondSession), "prompt": .string("must not run")], gateway: second))
-      try await h.requireJoined()
+      try await h.requireWorktreeRootsJoined(Array(remainingExecutions.keys))
     }
     let evidence = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_CASES"]))
     try JSONSerialization.data(withJSONObject: [
@@ -1315,6 +1330,54 @@ private final class CursorHarness: @unchecked Sendable {
 
   func lastWorkload() throws -> ExecutionMember {
     try peerMember(try #require(try vendorEffects().last { $0["phase"] == .string("workload") }))
+  }
+
+  func sourceWorktreeExecutions(since index: Int, profileID: GatewayProfileID) throws
+    -> [ExecutionMember: UUID]
+  {
+    let roots = mcpObservations.members.dropFirst(index)
+    let provider = PluginIdentity.package("cursor")
+    return try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
+      let records = try ExecutionRuntimeRecord.all(database)
+      var worktree: [ExecutionMember: UUID] = [:]
+      for root in roots {
+        let matches = records.filter { record in
+          record.children.values.contains { $0.recovery?.root == root }
+        }
+        let identity = "pid=\(root.processID) identity=\(root.identity)"
+        try #require(matches.count == 1, "\(identity) must have one Host execution")
+        let record = try #require(matches.first)
+        let execution = try #require(ledger.executions[record.id])
+        if execution.owner == .plugin(provider) && execution.delegatedTo == nil {
+          // Catalog discovery uses the provider's grant without a worktree reservation.
+          try #require(record.worktreeUse == nil && record.auditIdentity?.projectID == nil)
+          try #require(execution.authorizationIDs.count == 1)
+          print("Cursor discovery for \(profileID.rawValue) \(identity) execution=\(record.id)")
+        } else {
+          try #require(execution.delegatedTo == provider && execution.authorizationIDs.count == 2)
+          try #require(record.auditIdentity?.profileID == profileID)
+          try #require(record.worktreeUse?.admission.projectID == projectID)
+          worktree[root] = record.id
+          print("Cursor \(profileID.rawValue) worktree \(identity) execution=\(record.id)")
+        }
+      }
+      return worktree
+    }
+  }
+
+  func requireWorktreeRootsJoined(_ roots: [ExecutionMember]) async throws {
+    let deadline = ContinuousClock.now + .seconds(2)
+    for root in roots {
+      let ownership = try processOwner(root)
+      do {
+        _ = try await ownership.wait(until: deadline)
+        let remaining = try await ownership.members()
+        try #require(remaining.isEmpty, "Cursor worktree root \(root): \(remaining)")
+      } catch {
+        print("Cursor worktree root \(root) did not join: \(error)")
+        throw error
+      }
+    }
   }
 
   func requirePeerEvidence(_ root: ExecutionMember, phase: String) throws {
