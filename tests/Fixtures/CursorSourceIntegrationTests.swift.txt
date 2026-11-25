@@ -713,8 +713,9 @@ struct CursorSourceIntegrationTests {
         let record = try #require(
           try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         try cursorWorkingDirectory(try #require(record["cwd"] as? String), matches: h.worktree)
+        // Project write includes read access to the source checkout, which stays read-only.
         try #require(
-          record["denied"] as? [[String]] == Array(repeating: ["r", "a"], count: h.outside.count))
+          record["denied"] as? [[String]] == [["a"], ["r", "a"], ["r", "a"], ["r", "a"]])
       }
       let container = try h.base.database.prepareProviderContainer(.package("cursor")).sandbox
       let firstRecord = try #require(
@@ -933,6 +934,10 @@ private final class CursorHarness: @unchecked Sendable {
     var created: String?
     var stage = "worktree and package registration"
     do {
+      let unrelated = base.root.appendingPathComponent("unrelated-project")
+      try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: false)
+      try base.database.saveProject(
+        .init(id: "unrelated", displayName: "Unrelated", rootPath: unrelated.path))
       try await base.initializeRepository()
       let value = try cursorValue(
         try await lifecycle.callToolForMCPAsync(
@@ -944,7 +949,7 @@ private final class CursorHarness: @unchecked Sendable {
       let foreign = try base.database.prepareProviderContainer(.package("foreign")).sandbox
       let outside = [
         base.project.appendingPathComponent("source-main"),
-        base.root.appendingPathComponent("unrelated"),
+        unrelated.appendingPathComponent("value.txt"),
         base.database.permissionExecutionRoot.appendingPathComponent("host-secret"),
         URL(fileURLWithPath: foreign.state.value).appendingPathComponent("foreign-secret"),
       ]
