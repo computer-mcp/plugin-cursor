@@ -59,6 +59,25 @@ class HostSourceTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 driver.validate_acquisitions([cold, dict(warm, **{field: value})])
 
+    def test_native_stops_require_one_turn_per_addressed_request(self):
+        owners = [{"workload_pid": 10, "workload_identity": "11"},
+                  {"workload_pid": 20, "workload_identity": "21"}]
+        stops = [
+            {"prompt": label, "peer_pid": 10 if index < 4 else 20,
+             "peer_identity": "11" if index < 4 else "21", "acp_id": 10 + index,
+             "stop_request_id": f"stop-{index}", "prompt_request_id": f"prompt-{index}"}
+            for index, label in enumerate(("slow", "permission-on-cancel", "error-on-cancel",
+                                           "ignore-cancel", "complete-on-cancel"))
+        ]
+        stops[-1]["downstream_request_id"] = "retained-invocation"
+        driver.validate_native_stops(stops, owners)
+        for changes in ({"acp_id": 10}, {"stop_request_id": "stop-0"}, {"peer_pid": 20}):
+            with self.assertRaises(ValueError):
+                driver.validate_native_stops([stops[0], dict(stops[1], **changes), *stops[2:]], owners)
+        for invalid in ([stops[0], *stops], [stops[0], *stops[2:]]):
+            with self.assertRaises(ValueError):
+                driver.validate_native_stops(invalid, owners)
+
     def test_source_identity_and_dirt_are_rejected(self):
         sha = 'a' * 40
         with patch.object(driver, 'git', side_effect=[str(ROOT), sha, '']):

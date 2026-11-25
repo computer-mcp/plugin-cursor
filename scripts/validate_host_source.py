@@ -207,6 +207,30 @@ def validate_acquisitions(rows):
         raise ValueError("Cursor acquisitions reused a launch, child, execution, or authorization")
 
 
+def validate_native_stops(stops, acquisitions):
+    expected = ("slow", "permission-on-cancel", "error-on-cancel", "ignore-cancel", "complete-on-cancel")
+    if not isinstance(stops, list) or len(stops) != len(expected):
+        raise ValueError("Cursor did not record all addressed stops")
+    requests = []
+    turns = []
+    for index, (stop, prompt) in enumerate(zip(stops, expected)):
+        owner = acquisitions[0 if index < 4 else 1]
+        if (not isinstance(stop, dict) or stop.get("prompt") != prompt
+                or stop.get("peer_pid") != owner["workload_pid"]
+                or stop.get("peer_identity") != owner["workload_identity"]
+                or type(stop.get("acp_id")) is not int or stop["acp_id"] <= 0):
+            raise ValueError("Cursor stop was not correlated with its acquired workload and ACP turn")
+        turns.append((stop["peer_pid"], stop["peer_identity"], stop["acp_id"]))
+        requests.extend(stop.get(field) for field in ("stop_request_id", "prompt_request_id"))
+        downstream_id = stop.get("downstream_request_id")
+        if index == 4 and (not isinstance(downstream_id, str) or not downstream_id):
+            raise ValueError("Cursor sibling stop is missing its retained downstream request ID")
+    if (len(set(turns)) != len(turns)
+            or any(not isinstance(value, str) or not value for value in requests)
+            or len(set(requests)) != len(requests)):
+        raise ValueError("Cursor stop evidence reused an MCP request or ACP turn")
+
+
 def validate_startup_cancellation(evidence):
     if not isinstance(evidence, dict):
         raise ValueError("Host did not record startup cancellation")
@@ -319,6 +343,8 @@ def run(args):
             acquisitions = observed.get("acquisitions")
             validate_acquisitions(acquisitions)
             result["acquisitions"] = acquisitions
+            result["native_stops"] = observed.get("native_stops")
+            validate_native_stops(result["native_stops"], acquisitions)
             result["startup_cancellation"] = observed.get("startup_cancellation")
             validate_startup_cancellation(result["startup_cancellation"])
             result["lost_start_reply"] = observed.get("lost_start_reply")

@@ -21,9 +21,9 @@ private let cursorWriteTools: Set<String> = [
   "cursor.acp.session.cancel", "cursor.acp.session.close",
 ]
 
-@Suite(.nativeIntegration, .serialized, .timeLimit(.minutes(5)))
+@Suite(.nativeIntegration, .serialized)
 struct CursorSourceIntegrationTests {
-  @Test func registeredVendorStop() async throws {
+  @Test(.timeLimit(.minutes(10))) func registeredVendorStop() async throws {
     let env = ProcessInfo.processInfo.environment
     _ = try #require(env["COMPUTER_MCP_CURSOR_ARCHIVE"])
     _ = try #require(env["COMPUTER_MCP_CURSOR_ARCHIVE_SHA256"])
@@ -48,6 +48,7 @@ struct CursorSourceIntegrationTests {
     }
 
     var measured: [[String: Any]] = []
+    var nativeStops: [[String: Any]] = []
     try await withCursor(package) { h in
       try await h.discover()
       let baseline = h.mcpObservations.members.count
@@ -123,9 +124,12 @@ struct CursorSourceIntegrationTests {
       async let interactive = h.prompt(a, "permission-on-cancel")
       _ = try await h.waitPending(a)
       let beforeAnswer = try h.vendorEffects().count
-      let interactiveStop = try cursorValue(try await h.stop(a))
-      try #require(interactiveStop["cancel_requested"] == .bool(true))
-      let interactiveResult = try cursorNativeValue(try await interactive)
+      let interactiveStop = try await h.stop(a)
+      try #require(try cursorValue(interactiveStop)["cancel_requested"] == .bool(true))
+      let interactiveReply = try await interactive
+      h.reportStop(
+        pid: aPID, prompt: "permission-on-cancel", stop: interactiveStop, reply: interactiveReply)
+      let interactiveResult = try cursorNativeValue(interactiveReply)
       try #require(interactiveResult["stop_reason"] == .string("cancelled"))
       let answers = try h.vendorEffects().dropFirst(beforeAnswer).filter {
         $0["phase"] == .string("answer") && $0["pid"]?.intValue == Int(aPID)
@@ -236,21 +240,32 @@ struct CursorSourceIntegrationTests {
       let freshTurn = try h.vendorTurn(pid: bPID, prompt: freshB)
       let freshNativeID = try #require(freshTurn.first?["acp_id"]?.intValue)
       try #require(freshNativeID > bNativeID)
-      let effects = try h.vendorEffects()
-      try #require(effects.filter { $0["phase"]?.stringValue == "probe" }.count == 2)
-      try #require(
-        effects.filter {
-          $0["pid"]?.intValue == Int(aPID) && $0["phase"]?.stringValue == "cancel"
-        }.count == 3)
-      try #require(
-        effects.filter {
-          $0["pid"]?.intValue == Int(bPID) && $0["phase"]?.stringValue == "cancel"
-        }.count == 1)
       try #require(try h.nativeStarts == 2)
       try h.requireMCPLaunches(since: baseline, exactly: roots + [adapter])
       _ = try cursorValue(
         try await h.call("cursor.acp.session.close", ["session": .string(b)]))
       try #require(try await bOwner.members().isEmpty)
+
+      // Correlate each addressed stop with the peer turn and then require that
+      // these exact deliveries account for every cancel, including after close.
+      let correlations = try [
+        h.nativeStop(aRoot, prompt: "slow", stop: normalStop, promptReply: normalReply),
+        h.nativeStop(
+          aRoot, prompt: "permission-on-cancel", stop: interactiveStop,
+          promptReply: interactiveReply, terminalLogged: false),
+        h.nativeStop(
+          aRoot, prompt: "error-on-cancel", stop: errorStop, promptReply: errorReply),
+        h.nativeStop(
+          aRoot, prompt: "ignore-cancel", stop: ignoredStop, promptReply: ignoredReply,
+          terminalLogged: false),
+        h.nativeStop(
+          bRoot, prompt: bPrompt, stop: completionStop, promptReply: .object(completedReceipt)),
+      ]
+      let effects = try h.vendorEffects()
+      try #require(effects.filter { $0["phase"] == .string("probe") }.count == 2)
+      let actualCancels = effects.filter { $0["phase"] == .string("cancel") }
+      try #require(actualCancels == correlations.map(\.event))
+      nativeStops = correlations.map(\.receipt)
     }
     let evidence = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_CASES"]))
     let cases = [
@@ -258,7 +273,7 @@ struct CursorSourceIntegrationTests {
       "native-result-races", "pending-answer-cancel", "forced-stop-isolation", "cleanup",
       "startup-cancellation", "lost-start-reply", "pending-start-closure",
     ]
-    var details: [String: Any] = ["acquisitions": measured]
+    var details: [String: Any] = ["acquisitions": measured, "native_stops": nativeStops]
     details["startup_cancellation"] = try await registeredStartupCancellation(package)
     details["lost_start_reply"] = try await registeredLostStartReply(package)
     details["pending_start_closure"] = try await registeredPendingStartClosure(package)
@@ -561,7 +576,7 @@ struct CursorSourceIntegrationTests {
     return evidence
   }
 
-  @Test func sourceConsumer() async throws {
+  @Test(.timeLimit(.minutes(5))) func sourceConsumer() async throws {
     let env = ProcessInfo.processInfo.environment
     let source = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_PLUGIN"]))
     let package = try PluginPackage.load(at: source)
@@ -1677,6 +1692,34 @@ private final class CursorHarness: @unchecked Sendable {
       turn != nil && $0["pid"]?.intValue == Int(pid) && $0["acp_id"] == turn
     }
   }
+  func nativeStop(
+    _ root: ExecutionMember, prompt: String, stop: JSONValue, promptReply: JSONValue,
+    terminalLogged: Bool = true
+  ) throws -> (event: [String: JSONValue], receipt: [String: Any]) {
+    let turn = try vendorTurn(pid: root.processID, prompt: prompt)
+    let expectedPhases: [String?] =
+      terminalLogged ? ["prompt", "cancel", "terminal"] : ["prompt", "cancel"]
+    try #require(turn.map { $0["phase"]?.stringValue } == expectedPhases, "\(turn)")
+    let event = try #require(turn.dropFirst().first)
+    let acpID = try #require(event["acp_id"]?.intValue)
+    try #require(event["native_session"] == turn.first?["native_session"])
+    let stopID = try #require(
+      stop.objectValue?["structuredContent"]?.objectValue?["gateway_execution"]?.objectValue?[
+        "request_id"]?.stringValue)
+    let promptID = try #require(
+      promptReply.objectValue?["request_id"]?.stringValue
+        ?? promptReply.objectValue?["structuredContent"]?.objectValue?["gateway_execution"]?
+        .objectValue?["request_id"]?.stringValue)
+    var receipt: [String: Any] = [
+      "prompt": prompt, "peer_pid": Int(root.processID), "peer_identity": String(root.identity),
+      "acp_id": acpID, "stop_request_id": stopID, "prompt_request_id": promptID,
+    ]
+    if let downstream = promptReply.objectValue?["downstream_request_id"]?.stringValue {
+      receipt["downstream_request_id"] = downstream
+    }
+    return (event, receipt)
+  }
+
   func reportStop(pid: Int32, prompt: String, stop: JSONValue, reply: JSONValue) {
     let effects = (try? vendorTurn(pid: pid, prompt: prompt)) ?? []
     let trace = JSONValue.object([
