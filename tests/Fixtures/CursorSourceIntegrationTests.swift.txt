@@ -761,8 +761,9 @@ struct CursorSourceIntegrationTests {
       try await h.waitStarted(session)
       _ = try cursorValue(try await h.call("cursor.acp.session.cancel", args))
       let cancelled = try await h.waitResult(
-        session, prompt: try #require(slow["prompt_id"]?.stringValue))
-      try #require(cancelled["is_error"] == .bool(true))
+        session, prompt: try #require(slow["prompt_id"]?.stringValue),
+        expectingCancellation: true)
+      try #require(cancelled["closed"] == .bool(false))
       try #require(try h.nativeStarts == nativeStarts)
       // Client B uses a separate authority and kill domain in the same provider container.
       let firstOwnerships = h.mcpObservations.ownerships
@@ -844,6 +845,29 @@ private func cursorNativeValue(_ value: JSONValue) throws -> [String: JSONValue]
   let outer = try #require(
     value.objectValue?["structuredContent"]?.objectValue?["result"]?.objectValue)
   return try #require(outer["structuredContent"]?.objectValue?["result"]?.objectValue, "\(value)")
+}
+
+private func cursorPromptResult(
+  _ reply: JSONValue, session: String, prompt: String, expectingCancellation: Bool
+) throws -> [String: JSONValue] {
+  // The Host returns a successful envelope around Cursor's MCP reply.
+  try #require(reply.objectValue?["isError"] == .bool(false), "\(reply)")
+  let downstream = try #require(
+    reply.objectValue?["structuredContent"]?.objectValue?["result"]?.objectValue)
+  let result = try #require(
+    downstream["structuredContent"]?.objectValue?["result"]?.objectValue)
+  try #require(result["session"] == .string(session) && result["prompt_id"] == .string(prompt))
+  let completed = try #require(result["completed"]?.boolValue as Bool?)
+  let cancelled = completed && expectingCancellation
+  try #require(downstream["isError"] == .bool(cancelled) && result["error"] == nil, "\(reply)")
+  if completed {
+    try #require(result["is_error"] == .bool(cancelled), "\(reply)")
+  }
+  if cancelled {
+    try #require(result["stop_reason"] == .string("cancelled"))
+    try #require(result["native_result"]?.objectValue?["stopReason"] == .string("cancelled"))
+  }
+  return result
 }
 
 private func cursorDenied(_ value: JSONValue) throws {
@@ -1838,12 +1862,15 @@ private final class CursorHarness: @unchecked Sendable {
     }
     throw CursorFixtureError.deadline
   }
-  func waitResult(_ session: String, prompt: String) async throws -> [String: JSONValue] {
+  func waitResult(_ session: String, prompt: String, expectingCancellation: Bool = false)
+    async throws -> [String: JSONValue]
+  {
     for _ in 0..<200 {
-      let value = try cursorValue(
-        try await call(
-          "cursor.acp.session.prompt.result",
-          ["session": .string(session), "prompt_id": .string(prompt)]))
+      let reply = try await call(
+        "cursor.acp.session.prompt.result",
+        ["session": .string(session), "prompt_id": .string(prompt)])
+      let value = try cursorPromptResult(
+        reply, session: session, prompt: prompt, expectingCancellation: expectingCancellation)
       if value["completed"] == .bool(true) { return value }
       try await Task.sleep(for: .milliseconds(10))
     }
