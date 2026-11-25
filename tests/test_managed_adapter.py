@@ -22,6 +22,7 @@ from test_package import builder
 CAPABILITY = 'io.github.computer-mcp/vendor-execution-v1'
 METADATA = 'io.github.computer-mcp/work-invocation'
 PEER = ROOT / 'tests/Fixtures/vendor.py'
+START_TRANSPORT = ROOT / 'tests/Fixtures/vendor_start_transport.py'
 REFUSAL = 'vendor_effect_denied'
 
 
@@ -37,6 +38,7 @@ class VendorFixture:
         self.turn = None
         self.answers = []
         self.retirements = 0
+        self.launches = 0
         self.error = None
         self.thread.start()
 
@@ -69,6 +71,7 @@ class VendorFixture:
             assert completed.stdout == b'2026.05.04-08e5280\n', completed
         elif op == 'launch':
             assert self.vendor is None
+            self.launches += 1
             self.vendor = subprocess.Popen(
                 [sys.executable, str(PEER), 'acp'], cwd=self.home,
                 env={'HOME': str(self.home), 'CURSOR_SOURCE_FIXTURE': '1'},
@@ -97,6 +100,8 @@ class VendorFixture:
                 return {'error': self.answer_error}
         elif op == 'stop':
             result = {'turn': self.turn, 'dispatched': True, 'sent': False}
+        elif op == 'receipt':
+            result = {'retired': self.vendor is None, 'probe': 'probe', 'workload': 'workload'}
         elif op == 'retire':
             self.retire()
             self.retirements += 1
@@ -144,7 +149,7 @@ class ManagedAdapterTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
-    def managed(self, answer_error):
+    def managed(self, answer_error, *, transport=False):
         host = VendorFixture(self.home, answer_error)
         self.addCleanup(host.close)
         fd = host.adapter_socket.fileno()
@@ -153,10 +158,12 @@ class ManagedAdapterTests(unittest.TestCase):
             'os.dup2(fd,3); os.set_inheritable(3,True); '
             'os.close(fd) if fd!=3 else None; os.execv(sys.executable,[sys.executable,*sys.argv[2:]])'
         )
+        entry = [str(START_TRANSPORT), str(self.adapter)] if transport else [str(self.adapter)]
         client = Client(self.home, {
             'COMPUTER_MCP_HOST_CONTEXT': CAPABILITY, 'COMPUTER_MCP_HOST_FD': '3',
-        }, [sys.executable, '-B', '-c', bootstrap, str(fd), str(self.adapter),
-            '--host-vendor-execution'], pass_fds=(fd,))
+            'HOME': str(self.home),
+        }, [sys.executable, '-B', '-c', bootstrap, str(fd), *entry, '--host-vendor-execution'],
+            pass_fds=(fd,))
         self.addCleanup(client.close)
         host.adapter_socket.close()
         self.assertIs(client.initialization['result']['capabilities']['experimental'][CAPABILITY], True)
@@ -230,6 +237,42 @@ class ManagedAdapterTests(unittest.TestCase):
         self.assertGreaterEqual(host.retirements, 1)
         result = self.raw_call(client, 'session.prompt', {'session': session, 'prompt': 'hello'})
         self.assertTrue(result['result']['isError'])
+
+    def test_packaged_adapter_reconciles_a_dropped_launch_reply_without_replay(self):
+        client, host = self.managed(None, transport=True)
+        control = self.home / 'cursor-start-transport'
+        (control / 'fault').write_text('lose-reply')
+        opening = self.raw_call(client, 'session.open', wait=False)
+
+        def event(name, timeout=3):
+            path = control / (name + '.json')
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if path.is_file():
+                    return json.loads(path.read_text())
+                time.sleep(.01)
+            self.fail('Fixture did not observe ' + name)
+
+        dropped = event('launch-dropped')
+        lookup = event('receipt', timeout=12)
+        for field in ('call', 'acquisition', 'child'):
+            self.assertEqual(dropped['request'][field], lookup['request'][field])
+        self.assertFalse(lookup['reply']['result']['retired'])
+        self.assertIsNone(host.vendor.poll())
+        effects = self.home / 'cursor-vendor-effects.jsonl'
+        self.assertEqual([(row['phase'], row['pid']) for row in map(json.loads, effects.read_text().splitlines())],
+                         [('workload', host.vendor.pid)])
+        (control / 'receipt.release').touch()
+        retired = event('retire')
+        self.assertTrue(retired['reply']['result']['retired'])
+        self.assertIsNone(host.vendor)
+        (control / 'retire.release').touch()
+        response = client.wait(opening, timeout=5)
+        self.assertTrue(response['result']['isError'])
+        self.assertEqual(Client.value(response)['error']['code'], 'timeout')
+        self.assertEqual((host.launches, host.retirements), (1, 1))
+        self.assertFalse((control / 'launch-replayed.json').exists())
+        self.assertFalse((self.home / 'cursor-native-starts.jsonl').exists())
 
     def test_packaged_standalone_and_missing_managed_negotiation(self):
         environment = {'HOME': str(self.home), 'PATH': os.environ['PATH'], 'CURSOR_SOURCE_FIXTURE': '1'}

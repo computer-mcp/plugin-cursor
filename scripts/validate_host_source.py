@@ -34,7 +34,8 @@ SELECTORS = {
 }
 INPUTS = (
     "computer-mcp-plugin.toml", "tests/Fixtures/" + FIXTURE + ".txt",
-    "tests/Fixtures/vendor.py", "scripts/validate_host_source.py",
+    "tests/Fixtures/vendor.py", "tests/Fixtures/vendor_start_transport.py",
+    "scripts/validate_host_source.py",
     "bin/cursor-mcp-adapter", "bin/plugin_runtime.py", "cli-tree.json",
     "bin/cursor_vendor_execution.py", "cursor-vendor-execution.json", "scripts/build_package.py",
 )
@@ -197,28 +198,32 @@ def validate_startup_cancellation(evidence):
 
 
 def validate_start_recovery(lost, closure):
-    for record in (lost, closure):
+    phases = (("before_dispatch", "never_dispatched", 0), ("after_dispatch", "retired", 1))
+    if not isinstance(closure, dict):
+        raise ValueError("Host did not record pending connection closure")
+    for record in (lost, *(closure.get(key) for key, _, _ in phases)):
         if not isinstance(record, dict):
             raise ValueError("Host did not record startup recovery")
-        phases = [record.get(key) for key in ("acquisition", "execution", "probe", "workload")]
+        identities = [record.get(key) for key in ("acquisition", "execution", "probe", "workload")]
         if (any(not isinstance(value, str) or not re.fullmatch(
                     r"[0-9A-F]{8}-(?:[0-9A-F]{4}-){3}[0-9A-F]{12}", value)
-                for value in phases) or len(set(phases)) != len(phases)
+                for value in identities) or len(set(identities)) != len(identities)
                 or not all(isinstance(record.get(key), str) and record[key]
                            for key in ("request_id", "downstream_request_id"))):
             raise ValueError("Startup recovery identities are incomplete")
     pids = [lost.get("workload_pid"), lost.get("sibling_pid")]
     if (any(type(pid) is not int or pid <= 0 for pid in pids) or pids[0] == pids[1]
-            or lost.get("charged_at_lookup") is not True
-            or lost.get("charged_after_retirement") is not False
+            or lost.get("retired_at_lookup") is not False
+            or lost.get("retired_after_cleanup") is not True
             or type(lost.get("workload_starts")) is not int or lost["workload_starts"] != 1
             or lost.get("workload_state") != "retired" or lost.get("result") != "timeout"):
         raise ValueError("Lost start reply did not reconcile exactly one retired workload")
-    if (type(closure.get("workload_starts")) is not int or closure["workload_starts"] != 0
-            or closure.get("probe_state") != "retired"
-            or closure.get("workload_state") != "never_dispatched"
-            or closure.get("result") != "outcome_unknown" or closure.get("cleanup") != "confirmed"):
-        raise ValueError("Private channel closure did not confirm pending start cleanup")
+    for key, workload_state, workload_starts in phases:
+        record = closure[key]
+        if (type(record.get("workload_starts")) is not int or record["workload_starts"] != workload_starts
+                or record.get("probe_state") != "retired" or record.get("workload_state") != workload_state
+                or record.get("result") != "outcome_unknown" or record.get("cleanup") != "confirmed"):
+            raise ValueError(f"Private channel closure did not confirm cleanup {key}")
 
 
 def run(args):

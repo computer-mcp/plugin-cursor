@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import io
 import json
@@ -32,7 +33,20 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(signature, {
                 'capability': 'io.github.computer-mcp/vendor-execution-v1',
                 'dependency': 'cursor-agent',
-                'acquire': ['cursor.acp.session.open', 'cursor.acp.prompt'],
+                'tools': {
+                    'cursor.acp.prompt': 'acquire',
+                    'cursor.acp.session.open': 'acquire',
+                    'cursor.acp.session.prompt': 'prompt',
+                    'cursor.acp.session.prompt.start': 'detached_prompt',
+                    'cursor.acp.session.prompt.result': 'observe',
+                    'cursor.acp.session.list': 'observe',
+                    'cursor.acp.session.mode': 'mode',
+                    'cursor.acp.session.cancel': 'stop',
+                    'cursor.acp.session.close': 'close',
+                    'cursor.acp.events.read': 'observe',
+                    'cursor.acp.requests.list': 'observe',
+                    'cursor.acp.requests.respond': 'answer',
+                },
                 'probe': ['--version'],
                 'workload': ['acp'],
                 'version_stdout': next(check['stdout'] for check in tree['executable_checks']
@@ -41,9 +55,18 @@ class PackageTests(unittest.TestCase):
             self.assertIn(signature['dependency'], {dependency['id'] for dependency in manifest['dependencies']})
             [acp] = manifest['mcp']
             self.assertEqual((acp['id'], acp['transport']), ('acp', 'stdio'))
-            for name in ('cursor-vendor-execution.json', 'bin/cursor_vendor_execution.py',
-                         'bin/plugin_runtime.py', acp['executable']['path']):
+            declaration = acp['vendor_execution']
+            self.assertEqual(declaration['signature'], 'cursor-vendor-execution.json')
+            self.assertEqual(declaration['dependency'], signature['dependency'])
+            self.assertEqual({name for name, effect in signature['tools'].items() if effect == 'observe'},
+                             set(acp['tool_requirements']))
+            self.assertEqual(set(declaration['files']), {
+                declaration['signature'], acp['executable']['path'], 'bin/cursor_vendor_execution.py',
+                'bin/plugin_runtime.py', 'cli-tree.json',
+            })
+            for name, digest in declaration['files'].items():
                 self.assertEqual(archive.read(name), (ROOT / name).read_bytes())
+                self.assertEqual(hashlib.sha256(archive.read(name)).hexdigest(), digest)
             assets={'.github/assets/logo/logo-light.png', '.github/assets/logo/logo-dark.png'}
             self.assertEqual({name for name in names if name.startswith('.github/')},assets)
             for name in assets:

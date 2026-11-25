@@ -1,5 +1,6 @@
 import ComputerMCPMacOS
 import ComputerMCPPermissions
+import ComputerMCPSandbox
 import ComputerMCPTestSupport
 import Foundation
 import Testing
@@ -30,13 +31,13 @@ struct CursorSourceIntegrationTests {
     for (caller, provider) in [(1, true), (2, false)] {
       try await withCursor(package, caller: caller, provider: provider) { h in
         try await h.discover()
-        let before = h.base.observations.launches.count
+        let before = h.base.observations.members.count
         let denied = try await h.call("cursor.acp.session.open")
         try cursorDenied(denied)
         try #require(
           denied.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]
             == .string("permission.required"))
-        try #require(h.base.observations.launches.count == before)
+        try #require(h.base.observations.members.count == before)
         print(
           "Cursor gate denial preserved (caller write: \(caller == 2), provider write: \(provider))"
         )
@@ -45,41 +46,29 @@ struct CursorSourceIntegrationTests {
 
     var measured: [[String: Any]] = []
     try await withCursor(package) { h in
-      func providerLaunches() -> [ExecutionObservations.Launch] {
-        h.base.observations.launches.filter { $0.executable != h.base.platform.gitExecutable }
-      }
       try await h.discover()
-      let cold = providerLaunches().count
+      let baseline = h.base.observations.members.count
       let a = try await h.open()
-      let warm = providerLaunches().count
+      let warm = h.base.observations.members.count
       let b = try await h.open()
-      let launches = providerLaunches()
-      let first = Array(launches.dropFirst(cold).prefix(warm - cold))
-      let second = Array(launches.dropFirst(warm))
-      try #require(first.count == 3, "\(first)")
-      try #require(second.count == 2, "\(second)")
-      let adapter = try #require(first.first)
-      try #require(adapter.arguments.last == "--host-vendor-execution")
-      try #require(first.dropFirst().map(\.arguments) == [["--version"], ["acp"]])
-      try #require(second.map(\.arguments) == [["--version"], ["acp"]])
-      let allLaunchesSandboxed = (first + second).allSatisfy { $0.sandboxed }
-      try #require(allLaunchesSandboxed)
+      let peers = try h.vendorEffects()
+      try #require(
+        peers.compactMap { $0["phase"]?.stringValue } == ["probe", "workload", "probe", "workload"])
+      let roots = try peers.map { try h.peerMember($0) }
+      let launches = Array(h.base.observations.members.dropFirst(baseline))
+      try #require(Set(launches.suffix(from: warm - baseline)) == Set(roots.suffix(2)))
+      let adapter = try #require(Set(launches).subtracting(roots).first)
+      try #require(Set(launches) == Set(roots + [adapter]))
+      try #require(launches.count == 5)
       measured = try h.verifyAcquisitions(
-        first: Array(first.dropFirst()), second: second, adapterPID: adapter.member.processID)
-      let aPID = try #require(first.last?.member.processID)
-      let bPID = try #require(second.last?.member.processID)
-      print("Cursor gate acquired A \(aPID) and B \(bPID) in adapter \(adapter.member.processID)")
-      print(
-        "Cursor gate binaries \(adapter.executable) / \(first[1].executable) / \(second[0].executable)"
-      )
-      let aOwner = try #require(
-        h.base.observations.ownerships.first {
-          (try? $0.recoveryState().root.processID) == aPID
-        })
-      let bOwner = try #require(
-        h.base.observations.ownerships.first {
-          (try? $0.recoveryState().root.processID) == bPID
-        })
+        first: Array(roots.prefix(2)), second: Array(roots.suffix(2)), adapter: adapter)
+      let aRoot = roots[1]
+      let bRoot = roots[3]
+      let aPID = aRoot.processID
+      let bPID = bRoot.processID
+      let aOwner = try h.processOwner(aRoot)
+      let bOwner = try h.processOwner(bRoot)
+      print("Cursor gate acquired A \(aPID) and B \(bPID) in adapter \(adapter.processID)")
       let noFD = try cursorValue(try await h.prompt(a, "env"))
       try #require(noFD["text"] == .string("[]"))
       let outside = String(
@@ -184,7 +173,7 @@ struct CursorSourceIntegrationTests {
         started: isolationStarted)
       if !siblingAlive {
         let adapterOwner = h.base.observations.ownerships.first {
-          (try? $0.recoveryState().root.processID) == adapter.member.processID
+          (try? $0.recoveryState().root.processID) == adapter.processID
         }
         let adapterMembers = try? await adapterOwner?.members()
         h.reportIsolation(
@@ -218,11 +207,7 @@ struct CursorSourceIntegrationTests {
       try #require(bSettled.map { $0["phase"]?.stringValue } == ["prompt", "cancel", "terminal"])
       try #require(bSettled.last?["acp_id"]?.intValue == bNativeID)
       try #require(bSettled.last?["outcome"]?.objectValue?["result"] == won["native_result"])
-      let freshB = "fresh B prompt after A retirement"
-      let freshReply = try cursorValue(try await h.prompt(b, freshB))
-      try #require(freshReply["session"] == .string(b))
-      try #require(freshReply["stop_reason"] == .string("end_turn"))
-      try await h.waitVendorPrompt(pid: bPID, prompt: freshB)
+      let freshB = try await h.verifySiblingIO(b, root: bRoot, suffix: "forced-stop")
       let freshTurn = try h.vendorTurn(pid: bPID, prompt: freshB)
       let freshNativeID = try #require(freshTurn.first?["acp_id"]?.intValue)
       try #require(freshNativeID > bNativeID)
@@ -237,23 +222,21 @@ struct CursorSourceIntegrationTests {
           $0["pid"]?.intValue == Int(bPID) && $0["phase"]?.stringValue == "cancel"
         }.count == 1)
       try #require(try h.nativeStarts == 2)
-      try #require(providerLaunches().count == launches.count)
+      try #require(h.base.observations.members.count == baseline + launches.count)
       _ = try cursorValue(
         try await h.call("cursor.acp.session.close", ["session": .string(b)]))
       try #require(try await bOwner.members().isEmpty)
     }
     let evidence = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_CASES"]))
-    var cases = [
+    let cases = [
       "dual-authority", "cold-warm-ownership", "seatbelt-boundaries", "ordinary-cancel",
       "native-result-races", "pending-answer-cancel", "forced-stop-isolation", "cleanup",
+      "startup-cancellation", "lost-start-reply", "pending-start-closure",
     ]
     var details: [String: Any] = ["acquisitions": measured]
-    #if DEBUG
-      details["startup_cancellation"] = try await registeredStartupCancellation(package)
-      details["lost_start_reply"] = try await registeredLostStartReply(package)
-      details["pending_start_closure"] = try await registeredPendingStartClosure(package)
-      cases += ["startup-cancellation", "lost-start-reply", "pending-start-closure"]
-    #endif
+    details["startup_cancellation"] = try await registeredStartupCancellation(package)
+    details["lost_start_reply"] = try await registeredLostStartReply(package)
+    details["pending_start_closure"] = try await registeredPendingStartClosure(package)
     details["kind"] = "deterministic"
     details["tests_executed"] = 1
     let runID = try #require(env["COMPUTER_MCP_CURSOR_RUN_ID"])
@@ -262,376 +245,295 @@ struct CursorSourceIntegrationTests {
     try JSONSerialization.data(withJSONObject: details).write(to: evidence, options: .atomic)
   }
 
-  #if DEBUG
-    private func registeredStartupCancellation(_ package: PluginPackage) async throws
-      -> [String: Any]
-    {
-      var evidence: [String: Any] = [:]
-      try await withCursor(package) { h in
+  private func registeredStartupCancellation(_ package: PluginPackage) async throws
+    -> [String: Any]
+  {
+    var evidence: [String: Any] = [:]
+    for withdraw in [false, true] {
+      try await withCursor(package, observeStartup: true) { h in
         try await h.discover()
-        // Discovery and delegated execution use separate pool authority.
-        let executionBaseline = h.vendorLaunches.count
         let b = try await h.open()
-        let launches = Array(h.vendorLaunches.dropFirst(executionBaseline))
-        try #require(launches.count == 3)
-        try #require(launches.dropFirst().map(\.arguments) == [["--version"], ["acp"]])
-        let bPID = try #require(launches.last?.member.processID)
-        let adapter = try #require(launches.first)
-        try #require(adapter.arguments.last == "--host-vendor-execution")
-        let adapterPID = adapter.member.processID
-        let bOwner = try #require(
-          h.base.observations.ownerships.first {
-            (try? $0.recoveryState().root.processID) == bPID
-          })
+        let bRoot = try h.lastWorkload()
         let bPrompt = "complete-on-cancel"
-        let bRequest = "startup-sibling"
+        let bRequestID = "startup-sibling"
         let bStarted = try cursorValue(
           try await h.call(
             "cursor.acp.session.prompt", ["session": .string(b), "prompt": .string(bPrompt)],
-            startRequestID: bRequest))
+            startRequestID: bRequestID))
         try #require(bStarted["state"] == .string("running"))
         let bDownstream = try #require(bStarted["downstream_request_id"])
-        try await h.waitVendorPrompt(pid: bPID, prompt: bPrompt)
-        let bPending = try h.vendorTurn(pid: bPID, prompt: bPrompt)
-        try #require(bPending.map { $0["phase"]?.stringValue } == ["prompt"])
-        let bNative = try #require(bPending.first?["acp_id"])
+        try await h.waitVendorPrompt(pid: bRoot.processID, prompt: bPrompt)
+        let bNative = try #require(
+          try h.vendorTurn(pid: bRoot.processID, prompt: bPrompt).first?["acp_id"])
+        let requestID = withdraw ? "startup-withdraw" : "startup-control"
+        let before = h.base.observations.members.count
+        let startCount = try h.nativeStarts
+        try h.armStartupFault("hold-launch")
+        let started = try await h.startOpen(requestID)
+        let downstream = try #require(started["downstream_request_id"]?.stringValue)
+        let held = try await h.waitTransport("launch-held")
+        let boundary = try await h.startupBoundary(held)
+        let beforeStop = try h.startupChildren(boundary)
+        let probeRoot = try #require(beforeStop.probe.recovery?.root)
+        try #require(beforeStop.probe.completed && beforeStop.probe.recovery?.sandboxed == true)
+        try #require(!beforeStop.workload.completed && beforeStop.workload.recovery == nil)
+        try #require(Array(h.base.observations.members.dropFirst(before)) == [probeRoot])
+        try h.requirePeerEvidence(probeRoot, phase: "probe")
 
-        for withdraw in [false, true] {
-          let requestID = withdraw ? "startup-withdraw" : "startup-control"
-          let gate = CursorStartupBarrier<CursorStartupBoundary>()
-          let launchCount = h.vendorLaunches.count
-          let startCount = try h.nativeStarts
-          try await h.withStartupBarrier(gate) {
-            let started = try cursorValue(
-              try await h.call(
-                "cursor.acp.session.open", ["permission_policy": .string("manual")],
-                startRequestID: requestID))
-            try #require(started["request_id"] == .string(requestID))
-            try #require(started["state"] == .string("running"))
-            let downstream = try #require(started["downstream_request_id"]?.stringValue)
-            let boundary = try await gate.wait()
-            let initialReceipts = boundary.receipts()
-            try #require(initialReceipts.probe == "retired")
-            try #require(initialReceipts.workload == "pending")
-            let before = try h.startupChildren(boundary)
-            let probePID = try #require(before.probe.recovery?.root.processID)
-            try #require(before.probe.completed)
-            try #require(before.workload.recovery == nil && !before.workload.completed)
-            let atBoundary = Array(h.vendorLaunches.dropFirst(launchCount))
-            try #require(atBoundary.map(\.arguments) == [["--version"]])
-            try #require(atBoundary.first?.member.processID == probePID)
-            try #require(atBoundary.first?.sandboxed == true)
-            var trial: [String: Any] = [
-              "acquisition": boundary.acquisitionID.uuidString,
-              "execution": boundary.executionID.uuidString,
-              "probe": boundary.probeID.uuidString,
-              "workload": boundary.workloadID.uuidString,
-              "probe_pid": Int(probePID),
-              "probe_state": initialReceipts.probe,
-              "request_id": requestID,
-              "downstream_request_id": downstream,
-            ]
-
-            if withdraw {
-              let cancellation = try cursorValue(
-                try await h.gateway.callToolForMCPAsync(
-                  name: "mcp.requests.cancel",
-                  arguments: .object([
-                    "server": .string("cursor-fixture"), "request_id": .string(requestID),
-                  ]), context: .empty))
-              try #require(cancellation["cancellation_requested"] == .bool(true))
-              try #require(cancellation["request_id"] == .string(requestID))
-              let sealed = try h.startupChildren(boundary)
-              let receipts = boundary.receipts()
-              try #require(receipts.probe == "retired")
-              try #require(receipts.workload == "never_dispatched")
-              try #require(sealed.probe.completed)
-              try #require(sealed.probe.recovery?.root.processID == probePID)
-              try #require(sealed.workload.completed && sealed.workload.recovery == nil)
-              try #require(h.vendorLaunches.count == launchCount + 1)
-              trial["workload_state"] = receipts.workload
-              print("Cursor startup sealed \(boundary.acquisitionID) before workload bootstrap")
-            }
-
-            gate.release()
-            let receipt = try await h.waitRequestReceipt(requestID)
-            try #require(receipt["request_id"] == .string(requestID))
-            try #require(receipt["downstream_request_id"] == .string(downstream))
-            let reply = try #require(receipt["result"])
-            if withdraw {
-              try #require(receipt["state"] == .string("failed"), "\(receipt)")
-              try #require(receipt["cancellation"] == .string("sent"))
-              try #require(reply.objectValue?["isError"] == .bool(true))
-              let payload = reply.objectValue?["structuredContent"]?.objectValue?["result"]
-              try #require(
-                payload?.objectValue?["error"]?.objectValue?["code"] == .string("cancelled"))
-              try #require(h.vendorLaunches.count == launchCount + 1)
-              try #require(try h.nativeStarts == startCount)
-              trial["workload_starts"] = 0
-              trial["result"] = "cancelled"
-            } else {
-              try #require(receipt["state"] == .string("succeeded"), "\(receipt)")
-              let opened = try cursorValue(reply)
-              let session = try #require(opened["session"]?.stringValue)
-              let live = try h.startupChildren(boundary)
-              let workloadPID = try #require(live.workload.recovery?.root.processID)
-              try #require(!live.workload.completed)
-              let launches = Array(h.vendorLaunches.dropFirst(launchCount))
-              try #require(launches.map(\.arguments) == [["--version"], ["acp"]])
-              try #require(launches.last?.member.processID == workloadPID)
-              try #require(launches.last?.sandboxed == true)
-              try #require(try h.nativeStarts == startCount + 1)
-              let owner = try #require(
-                h.base.observations.ownerships.first {
-                  (try? $0.recoveryState().root.processID) == workloadPID
-                })
-              _ = try cursorValue(
-                try await h.call("cursor.acp.session.close", ["session": .string(session)]))
-              try #require(try await owner.members().isEmpty)
-              trial["workload_pid"] = Int(workloadPID)
-              trial["workload_starts"] = 1
-              trial["result"] = "opened"
-              print("Cursor startup control \(boundary.acquisitionID) launched \(workloadPID)")
-            }
-            evidence[withdraw ? "cancelled" : "control"] = trial
-          }
+        var trial = h.startupEvidence(boundary, requestID: requestID, downstream: downstream)
+        trial["probe_state"] = "retired"
+        trial["probe_pid"] = Int(probeRoot.processID)
+        if withdraw {
+          let cancelled = try cursorValue(
+            try await h.gateway.callToolForMCPAsync(
+              name: "mcp.requests.cancel",
+              arguments: .object([
+                "server": .string("cursor-fixture"), "request_id": .string(requestID),
+              ]), context: .empty))
+          try #require(cancelled["cancellation_requested"] == .bool(true))
+          try #require(cancelled["request_id"] == .string(requestID))
         }
-
-        try #require(try await bOwner.members().contains(where: { $0.processID == bPID }))
-        let stillPending = try h.vendorTurn(pid: bPID, prompt: bPrompt)
-        try #require(stillPending.map { $0["phase"]?.stringValue } == ["prompt"])
-        try #require(stillPending.first?["acp_id"] == bNative)
-        let stop = try cursorValue(try await h.stop(b))
-        try #require(stop["cancel_requested"] == .bool(true))
-        let completed = try await h.waitRequestReceipt(bRequest)
-        try #require(completed["state"] == .string("succeeded"), "\(completed)")
-        try #require(completed["downstream_request_id"] == bDownstream)
-        let result = try cursorValue(try #require(completed["result"]))
-        try #require(
-          result["session"] == .string(b) && result["stop_reason"] == .string("end_turn"))
-        let settled = try h.vendorTurn(pid: bPID, prompt: bPrompt)
-        try #require(settled.map { $0["phase"]?.stringValue } == ["prompt", "cancel", "terminal"])
-        try #require(settled.last?["acp_id"] == bNative)
-        try #require(settled.last?["outcome"]?.objectValue?["result"] == result["native_result"])
-        let fresh = "fresh B after startup cancellation"
-        let reply = try cursorValue(try await h.prompt(b, fresh))
-        try #require(reply["session"] == .string(b) && reply["stop_reason"] == .string("end_turn"))
-        try await h.waitVendorPrompt(pid: bPID, prompt: fresh)
-        let freshTurn = try h.vendorTurn(pid: bPID, prompt: fresh)
-        let freshID = try #require(freshTurn.first?["acp_id"]?.intValue)
-        let originalID = try #require(bNative.intValue)
-        try #require(freshID > originalID)
-        _ = try cursorValue(try await h.call("cursor.acp.session.close", ["session": .string(b)]))
-        try #require(try await bOwner.members().isEmpty)
-        let adapters = h.vendorLaunches.dropFirst(executionBaseline).filter {
-          $0.arguments.last == "--host-vendor-execution"
-        }
-        try #require(adapters.map(\.member.processID) == [adapterPID])
-        evidence["sibling_pid"] = Int(bPID)
-        evidence["adapter_pid"] = Int(adapterPID)
-      }
-      return evidence
-    }
-
-    private func registeredLostStartReply(_ package: PluginPackage) async throws -> [String: Any] {
-      var evidence: [String: Any] = [:]
-      try await withCursor(package) { h in
-        try await h.discover()
-        let b = try await h.open()
-        let bPID = try #require(h.vendorLaunches.last?.member.processID)
-        let before = h.vendorLaunches.count
-        let launch = CursorStartupBarrier<CursorStartupReply>()
-        let lookup = CursorStartupBarrier<CursorStartupReply>()
-        let retire = CursorStartupBarrier<CursorStartupReply>()
-        try await h.withVendorReplyObserver(
-          { reply in
-            switch reply.operation {
-            case .launch:
-              await launch.park(reply)
-              return true
-            case .receipt:
-              await lookup.park(reply)
-              return false
-            case .retire:
-              await retire.park(reply)
-              return false
-            }
-          },
-          release: {
-            launch.release()
-            lookup.release()
-            retire.release()
-          }
-        ) {
-          let requestID = "startup-lost-reply"
-          let arguments: [String: JSONValue] = ["permission_policy": .string("manual")]
-          let started = try cursorValue(
-            try await h.call("cursor.acp.session.open", arguments, startRequestID: requestID))
-          try #require(started["state"] == .string("running"))
-          try #require(started["request_id"] == .string(requestID))
-          let downstream = try #require(started["downstream_request_id"]?.stringValue)
-          let withheld = try await launch.wait()
-          let boundary = withheld.boundary
-          let probeID = JSONValue.string(boundary.probeID.uuidString.lowercased())
-          let workloadID = JSONValue.string(boundary.workloadID.uuidString.lowercased())
-          let pid = try await h.waitForNewWorkload(since: before)
-          let live = try h.startupChildren(boundary)
-          let member = try #require(live.workload.recovery?.root)
-          try #require(member.processID == pid)
-          try #require(withheld.requestedWorkloadID == boundary.workloadID)
-          let durable = try h.workloadJournal(boundary)
-          try #require(durable.recovery.root == member && !durable.completed)
-          try #require(withheld.charged)
-          print("Cursor startup reply dropped for \(boundary.workloadID) after peer \(pid) started")
-          launch.release()
-
-          let recovered = try await lookup.wait(timeout: .seconds(15))
-          try #require(recovered.boundary.acquisitionID == boundary.acquisitionID)
-          try #require(recovered.boundary.executionID == boundary.executionID)
-          try #require(recovered.requestedWorkloadID == boundary.workloadID)
-          try #require(recovered.payload["probe"] == probeID)
-          try #require(recovered.payload["workload"] == workloadID)
-          try #require(recovered.payload["probe_state"] == .string("retired"))
-          try #require(recovered.payload["workload_state"] == .string("pending"))
-          try #require(recovered.payload["retired"] == .bool(false))
-          try #require(recovered.charged)
-          print("Cursor startup lookup recovered \(boundary.workloadID) while still charged")
-          let pending = try h.workloadJournal(boundary)
-          try #require(pending.recovery.root == member && !pending.completed)
-          let during = "B while A start receipt is pending"
-          let bReply = try cursorValue(try await h.prompt(b, during))
-          try #require(
-            bReply["session"] == .string(b) && bReply["stop_reason"] == .string("end_turn"))
-          try await h.waitVendorPrompt(pid: bPID, prompt: during)
-          lookup.release()
-
-          let settled = try await retire.wait()
-          try #require(settled.boundary.acquisitionID == boundary.acquisitionID)
-          try #require(settled.requestedWorkloadID == boundary.workloadID)
-          try #require(settled.payload["probe"] == probeID)
-          try #require(settled.payload["workload"] == workloadID)
-          try #require(settled.payload["workload_state"] == .string("retired"))
-          try #require(settled.payload["retired"] == .bool(true) && !settled.charged)
-          let complete = try h.workloadJournal(boundary)
-          try #require(complete.completed && complete.recovery.root == member)
-          let owner = try #require(
-            h.base.observations.ownerships.first {
-              (try? $0.recoveryState().root) == member
-            })
-          try #require(try await owner.members().isEmpty)
-          print("Cursor startup retired \(boundary.workloadID) and released its capacity")
-          retire.release()
-
-          let terminal = try await h.waitRequestReceipt(requestID)
+        try h.releaseTransport("launch-held")
+        let delivered = try await h.waitTransport("launch-delivered")
+        try #require(delivered.request == held.request)
+        let terminal = try await h.waitRequestReceipt(requestID)
+        try #require(terminal["request_id"] == .string(requestID))
+        try #require(terminal["downstream_request_id"] == .string(downstream))
+        let reply = try #require(terminal["result"])
+        if withdraw {
+          try #require(delivered.reply?["error"] == .string("cancelled"))
           try #require(terminal["state"] == .string("failed"), "\(terminal)")
-          try #require(terminal["downstream_request_id"] == .string(downstream))
-          let reply = try #require(terminal["result"])
+          try #require(terminal["cancellation"] == .string("sent"))
           try #require(reply.objectValue?["isError"] == .bool(true))
           let payload = reply.objectValue?["structuredContent"]?.objectValue?["result"]
-          try #require(payload?.objectValue?["error"]?.objectValue?["code"] == .string("timeout"))
-          let repeated = try cursorValue(
-            try await h.call("cursor.acp.session.open", arguments, startRequestID: requestID))
-          try #require(repeated["state"] == .string("failed"))
-          try #require(repeated["downstream_request_id"] == .string(downstream))
-          try #require(repeated["result"] == reply)
-          try #require(repeated["replayed"] == .bool(false))
-
-          let fresh = "B after lost start reply settlement"
-          let bFresh = try cursorValue(try await h.prompt(b, fresh))
+          try #require(payload?.objectValue?["error"]?.objectValue?["code"] == .string("cancelled"))
+          try await h.requireNeverLaunched(boundary, probe: probeRoot)
+          try #require(Array(h.base.observations.members.dropFirst(before)) == [probeRoot])
+          try #require(try h.nativeStarts == startCount)
+          trial["workload_state"] = "never_dispatched"
+          trial["workload_starts"] = 0
+          trial["result"] = "cancelled"
           try #require(
-            bFresh["session"] == .string(b) && bFresh["stop_reason"] == .string("end_turn"))
-          try await h.waitVendorPrompt(pid: bPID, prompt: fresh)
-          let measured = Array(h.vendorLaunches.dropFirst(before))
-          try #require(measured.map(\.arguments) == [["--version"], ["acp"]])
-          let peers = try h.vendorEffects().filter { $0["phase"] == .string("workload") }
-          try #require(peers.compactMap { $0["pid"]?.intValue } == [Int(bPID), Int(pid)])
-          try #require(try h.nativeStarts == 1)
-          evidence = [
-            "request_id": requestID, "downstream_request_id": downstream,
-            "acquisition": boundary.acquisitionID.uuidString,
-            "execution": boundary.executionID.uuidString, "probe": boundary.probeID.uuidString,
-            "workload": boundary.workloadID.uuidString, "workload_pid": Int(pid),
-            "sibling_pid": Int(bPID), "charged_at_lookup": recovered.charged,
-            "charged_after_retirement": settled.charged, "workload_starts": peers.count - 1,
-            "workload_state": "retired", "result": "timeout",
-          ]
+            boundary.adapter != bRoot && bRoot != probeRoot && boundary.adapter != probeRoot)
+          evidence["adapter_pid"] = Int(boundary.adapter.processID)
+          evidence["sibling_pid"] = Int(bRoot.processID)
+        } else {
+          let hostReceipt = try h.startupReply(delivered, boundary: boundary)
+          try #require(hostReceipt["retired"] == .bool(false))
+          try #require(terminal["state"] == .string("succeeded"), "\(terminal)")
+          let session = try #require(try cursorValue(reply)["session"]?.stringValue)
+          let live = try h.startupChildren(boundary)
+          let root = try #require(live.workload.recovery?.root)
+          try #require(!live.workload.completed && live.workload.recovery?.sandboxed == true)
+          try #require(Array(h.base.observations.members.dropFirst(before)) == [probeRoot, root])
+          try h.requirePeerEvidence(root, phase: "workload")
+          try #require(try h.nativeStarts == startCount + 1)
+          _ = try cursorValue(
+            try await h.call("cursor.acp.session.close", ["session": .string(session)]))
+          let owner = try h.processOwner(root)
+          try #require(try await owner.members().isEmpty)
+          trial["workload_pid"] = Int(root.processID)
+          trial["workload_starts"] = 1
+          trial["result"] = "opened"
         }
+        let siblingPending = try h.vendorTurn(pid: bRoot.processID, prompt: bPrompt)
+        try #require(siblingPending.map { $0["phase"] } == [.string("prompt")])
+        let bStop = try cursorValue(try await h.stop(b))
+        try #require(bStop["cancel_requested"] == .bool(true))
+        let finished = try await h.waitRequestReceipt(bRequestID)
+        try #require(finished["state"] == .string("succeeded"))
+        try #require(finished["downstream_request_id"] == bDownstream)
+        let bReply = try cursorValue(try #require(finished["result"]))
+        try #require(
+          bReply["session"] == .string(b) && bReply["stop_reason"] == .string("end_turn"))
+        let siblingSettled = try h.vendorTurn(pid: bRoot.processID, prompt: bPrompt)
+        try #require(
+          siblingSettled.map { $0["phase"] } == [
+            .string("prompt"), .string("cancel"), .string("terminal"),
+          ])
+        try #require(siblingSettled.last?["acp_id"] == bNative)
+        try #require(
+          siblingSettled.last?["outcome"]?.objectValue?["result"] == bReply["native_result"])
+        _ = try await h.verifySiblingIO(
+          b, root: bRoot, suffix: withdraw ? "after-startup-cancellation" : "after-control-close")
         _ = try cursorValue(try await h.call("cursor.acp.session.close", ["session": .string(b)]))
+        let bOwner = try h.processOwner(bRoot)
+        try #require(try await bOwner.members().isEmpty)
+        evidence[withdraw ? "cancelled" : "control"] = trial
       }
-      return evidence
     }
+    return evidence
+  }
 
-    private func registeredPendingStartClosure(_ package: PluginPackage) async throws -> [String:
-      Any]
-    {
-      var evidence: [String: Any] = [:]
-      try await withCursor(package) { h in
+  private func registeredLostStartReply(_ package: PluginPackage) async throws -> [String: Any] {
+    var evidence: [String: Any] = [:]
+    try await withCursor(package, observeStartup: true) { h in
+      try await h.discover()
+      let b = try await h.open()
+      let bRoot = try h.lastWorkload()
+      let before = h.base.observations.members.count
+      try h.armStartupFault("lose-reply")
+      let requestID = "startup-lost-reply"
+      let started = try await h.startOpen(requestID)
+      let downstream = try #require(started["downstream_request_id"]?.stringValue)
+      let dropped = try await h.waitTransport("launch-dropped")
+      let boundary = try await h.startupBoundary(dropped)
+      let launch = try h.startupReply(dropped, boundary: boundary)
+      try #require(launch["retired"] == .bool(false))
+      let recovered = try await h.waitTransport("receipt", timeout: .seconds(14))
+      try h.requireNewRequest(recovered, after: dropped)
+      let lookup = try h.startupReply(recovered, boundary: boundary)
+      try #require(
+        lookup["probe_state"] == .string("retired") && lookup["probe_settled"] == .bool(true))
+      try #require(
+        lookup["workload_state"] == .string("pending") && lookup["workload_settled"] == .bool(false)
+      )
+      try #require(lookup["retired"] == .bool(false))
+      let live = try h.startupChildren(boundary)
+      let root = try #require(live.workload.recovery?.root)
+      let probe = try #require(live.probe.recovery?.root)
+      try #require(live.probe.completed && !live.workload.completed)
+      try h.requirePeerEvidence(root, phase: "workload")
+      try h.requirePeerEvidence(probe, phase: "probe")
+      let durable = try h.phaseJournal(boundary.workloadID, boundary: boundary)
+      try #require(durable.recovery.root == root && !durable.completed && !durable.released)
+      let aOwner = try h.processOwner(root)
+      try #require(try await aOwner.members().contains(root))
+      let bOwner = try h.processOwner(bRoot)
+      try #require(try await bOwner.members().contains(bRoot))
+      _ = try await h.verifySiblingIO(b, root: bRoot, suffix: "while-launch-reply-lost")
+      try h.releaseTransport("receipt")
+
+      let retired = try await h.waitTransport("retire")
+      try h.requireNewRequest(retired, after: recovered)
+      let settled = try h.startupReply(retired, boundary: boundary)
+      try #require(
+        settled["probe_state"] == .string("retired") && settled["probe_settled"] == .bool(true))
+      try #require(
+        settled["workload_state"] == .string("retired")
+          && settled["workload_settled"] == .bool(true))
+      try #require(settled["retired"] == .bool(true))
+      let complete = try h.startupChildren(boundary)
+      try #require(complete.probe.completed && complete.probe.recovery?.root == probe)
+      try #require(complete.workload.completed && complete.workload.recovery?.root == root)
+      let journal = try h.phaseJournal(boundary.workloadID, boundary: boundary)
+      try #require(journal.completed && journal.recovery.root == root)
+      try #require(try await aOwner.members().isEmpty)
+      try h.releaseTransport("retire")
+
+      let terminal = try await h.waitRequestReceipt(requestID)
+      try #require(terminal["state"] == .string("failed"), "\(terminal)")
+      try #require(terminal["downstream_request_id"] == .string(downstream))
+      let reply = try #require(terminal["result"])
+      try #require(reply.objectValue?["isError"] == .bool(true))
+      let payload = reply.objectValue?["structuredContent"]?.objectValue?["result"]
+      try #require(payload?.objectValue?["error"]?.objectValue?["code"] == .string("timeout"))
+      let repeated = try cursorValue(
+        try await h.call(
+          "cursor.acp.session.open", ["permission_policy": .string("manual")],
+          startRequestID: requestID))
+      try #require(repeated["state"] == .string("failed"))
+      try #require(repeated["downstream_request_id"] == .string(downstream))
+      try #require(repeated["result"] == reply && repeated["replayed"] == .bool(false))
+      try h.requireNoTransportEvent("launch-replayed")
+      _ = try await h.verifySiblingIO(b, root: bRoot, suffix: "after-lost-launch-reply")
+      try #require(Array(h.base.observations.members.dropFirst(before)) == [probe, root])
+      let starts = try h.vendorEffects().filter { $0["phase"] == .string("workload") }
+      try #require(
+        starts.compactMap { $0["pid"]?.intValue } == [Int(bRoot.processID), Int(root.processID)])
+      try #require(try h.nativeStarts == 1)
+      evidence = h.startupEvidence(boundary, requestID: requestID, downstream: downstream)
+      evidence["workload_pid"] = Int(root.processID)
+      evidence["sibling_pid"] = Int(bRoot.processID)
+      evidence["workload_starts"] = starts.count - 1
+      evidence["workload_state"] = settled["workload_state"]?.stringValue
+      evidence["retired_at_lookup"] = lookup["retired"] == .bool(true)
+      evidence["retired_after_cleanup"] = settled["retired"] == .bool(true)
+      evidence["result"] = "timeout"
+      _ = try cursorValue(try await h.call("cursor.acp.session.close", ["session": .string(b)]))
+    }
+    return evidence
+  }
+
+  private func registeredPendingStartClosure(_ package: PluginPackage) async throws -> [String: Any]
+  {
+    var evidence: [String: Any] = [:]
+    for dispatched in [false, true] {
+      try await withCursor(package, observeStartup: true) { h in
         try await h.discover()
         _ = try await h.open()
-        let bPID = try #require(h.vendorLaunches.last?.member.processID)
-        let bOwner = try #require(
-          h.base.observations.ownerships.first {
-            (try? $0.recoveryState().root.processID) == bPID
-          })
-        let before = h.vendorLaunches.count
-        let gate = CursorStartupBarrier<CursorStartupBoundary>()
-        try await h.withStartupBarrier(gate) {
-          let requestID = "startup-connection-closure"
-          let started = try cursorValue(
-            try await h.call(
-              "cursor.acp.session.open", ["permission_policy": .string("manual")],
-              startRequestID: requestID))
-          try #require(started["state"] == .string("running"))
-          let downstream = try #require(started["downstream_request_id"]?.stringValue)
-          let boundary = try await gate.wait()
-          let beforeClosure = try h.startupChildren(boundary)
-          let probeRoot = try #require(beforeClosure.probe.recovery?.root)
-          try #require(beforeClosure.probe.completed && !beforeClosure.workload.completed)
-          try #require(beforeClosure.workload.recovery == nil)
-          let owner = try await h.vendorRequestOwner(requestID)
-          async let close = h.closeVendorConnection(owner)
-          do {
-            try await h.waitForStartupDrain(boundary)
-          } catch {
-            gate.release()
-            _ = try? await close
-            throw error
-          }
-          gate.release()
-
-          let result = try await close
-          try #require(result["transport_closed"] == .bool(true))
-          try #require(result["connection_id"] == .string(owner.connectionID.uuidString))
-          try #require(result["managed_process_exit_confirmed"] == .bool(true))
-          try #require(result["work_cleanup"] == .string("confirmed"), "\(result)")
-          try #require(result["remaining_owners"] == .integer(0), "\(result)")
-          print("Cursor private channel close joined pending startup \(boundary.acquisitionID)")
-          let after = try h.startupChildren(boundary)
-          try #require(after.probe.completed && after.workload.completed)
-          try #require(after.probe.recovery?.root == probeRoot)
-          try #require(after.workload.recovery == nil)
-          try #require(try await bOwner.members().isEmpty)
-          let measured = Array(h.vendorLaunches.dropFirst(before))
-          try #require(measured.map(\.arguments) == [["--version"]])
-          let terminal = try await h.waitRequestReceipt(requestID)
-          try #require(terminal["state"] == .string("outcome_unknown"))
-          try #require(terminal["cleanup"] == .string("confirmed"))
-          try #require(terminal["downstream_request_id"] == .string(downstream))
-          try #require(try h.nativeStarts == 1)
-          evidence = [
-            "request_id": requestID, "downstream_request_id": downstream,
-            "acquisition": boundary.acquisitionID.uuidString,
-            "execution": boundary.executionID.uuidString, "probe": boundary.probeID.uuidString,
-            "workload": boundary.workloadID.uuidString, "workload_starts": measured.count - 1,
-            "probe_state": boundary.receipts().probe,
-            "workload_state": boundary.receipts().workload,
-            "result": "outcome_unknown", "cleanup": "confirmed",
-          ]
+        let sibling = try h.lastWorkload()
+        let siblingOwner = try h.processOwner(sibling)
+        let before = h.base.observations.members.count
+        try h.armStartupFault(dispatched ? "hold-launch-reply" : "hold-launch")
+        let requestID =
+          dispatched ? "startup-close-after-dispatch" : "startup-close-before-dispatch"
+        let started = try await h.startOpen(requestID)
+        let downstream = try #require(started["downstream_request_id"]?.stringValue)
+        let held = try await h.waitTransport(dispatched ? "launch-reply-held" : "launch-held")
+        let boundary = try await h.startupBoundary(held)
+        let live = try h.startupChildren(boundary)
+        let probe = try #require(live.probe.recovery?.root)
+        let workload: ExecutionMember?
+        try #require(live.probe.completed && !live.workload.completed)
+        try h.requirePeerEvidence(probe, phase: "probe")
+        var roots = [probe]
+        if dispatched {
+          let launch = try h.startupReply(held, boundary: boundary)
+          try #require(
+            launch["retired"] == .bool(false) && launch["workload_settled"] == .bool(false))
+          let root = try await h.waitStartedWorkload(boundary)
+          workload = root
+          roots.append(root)
+        } else {
+          try #require(live.workload.recovery == nil)
+          workload = nil
         }
+        let owner = try await h.vendorRequestOwner(requestID)
+        let clock = ContinuousClock()
+        let start = clock.now
+        let result = try await h.closeVendorConnection(owner)
+        try #require(start.duration(to: clock.now) < .seconds(8))
+        try #require(result["transport_closed"] == .bool(true))
+        try #require(result["connection_id"] == .string(owner.connectionID.uuidString))
+        try #require(result["managed_process_exit_confirmed"] == .bool(true))
+        try #require(result["work_cleanup"] == .string("confirmed"), "\(result)")
+        try #require(result["remaining_owners"] == .integer(0), "\(result)")
+        if let workload {
+          let paired = try h.startupChildren(boundary)
+          try #require(paired.probe.completed && paired.probe.recovery?.root == probe)
+          try #require(paired.workload.completed && paired.workload.recovery?.root == workload)
+          for (child, root) in [(boundary.probeID, probe), (boundary.workloadID, workload)] {
+            let journal = try h.phaseJournal(child, boundary: boundary)
+            try #require(journal.completed && journal.recovery.root == root)
+            let process = try h.processOwner(root)
+            try #require(try await process.members().isEmpty)
+          }
+        } else {
+          try await h.requireNeverLaunched(boundary, probe: probe)
+          try h.requireNoTransportEvent("launch-delivered")
+        }
+        try h.requireNoTransportEvent("launch-replayed")
+        try #require(try await siblingOwner.members().isEmpty)
+        let adapter = try h.processOwner(boundary.adapter)
+        try #require(try await adapter.members().isEmpty)
+        try #require(Array(h.base.observations.members.dropFirst(before)) == roots)
+        let terminal = try await h.waitRequestReceipt(requestID)
+        try #require(terminal["state"] == .string("outcome_unknown"))
+        try #require(terminal["cleanup"] == .string("confirmed"))
+        try #require(terminal["downstream_request_id"] == .string(downstream))
+        try #require(try h.nativeStarts == 1)
+        var trial = h.startupEvidence(boundary, requestID: requestID, downstream: downstream)
+        trial["probe_state"] = "retired"
+        trial["workload_starts"] = roots.count - 1
+        trial["workload_state"] = dispatched ? "retired" : "never_dispatched"
+        trial["result"] = "outcome_unknown"
+        trial["cleanup"] = "confirmed"
+        evidence[dispatched ? "after_dispatch" : "before_dispatch"] = trial
       }
-      return evidence
     }
-  #endif
+    return evidence
+  }
 
   @Test func sourceConsumer() async throws {
     let env = ProcessInfo.processInfo.environment
@@ -914,9 +816,10 @@ private func cursorDenied(_ value: JSONValue) throws {
 }
 private func withCursor(
   _ package: PluginPackage, caller: Int = 2, provider: Bool = true,
-  use: Bool = true, body: (CursorHarness) async throws -> Void
+  use: Bool = true, observeStartup: Bool = false, body: (CursorHarness) async throws -> Void
 ) async throws {
-  let h = try await CursorHarness.make(package, caller: caller, provider: provider, use: use)
+  let h = try await CursorHarness.make(
+    package, caller: caller, provider: provider, use: use, observeStartup: observeStartup)
   do { try await body(h) } catch {
     do { try await h.close() } catch { Issue.record("Cursor cleanup failed: \(error)") }
     throw error
@@ -924,41 +827,26 @@ private func withCursor(
   try await h.close()
 }
 
-#if DEBUG
-  private typealias CursorStartupBoundary = CursorVendorStartupObservation.Boundary
-  private typealias CursorStartupReply = CursorVendorStartupObservation.Reply
+private struct CursorStartupBoundary {
+  let acquisitionID: UUID
+  let executionID: UUID
+  let probeID: UUID
+  let workloadID: UUID
+  let adapter: ExecutionMember
+}
 
-  private final class CursorStartupBarrier<Value: Sendable>: Sendable {
-    private let arrival = AsyncStream<Value>.makeStream(bufferingPolicy: .bufferingNewest(1))
-    private let permission = AsyncStream<Void>.makeStream()
+private struct CursorTransportEvent: Decodable {
+  let adapterPID: Int32
+  let request: [String: JSONValue]
+  let reply: [String: JSONValue]?
 
-    func park(_ boundary: Value) async {
-      arrival.continuation.yield(boundary)
-      arrival.continuation.finish()
-      var permit = permission.stream.makeAsyncIterator()
-      _ = await permit.next()
-    }
-
-    func wait(timeout: Duration = .seconds(10)) async throws -> Value {
-      try await withThrowingTaskGroup(of: Value.self) { group in
-        group.addTask {
-          var events = self.arrival.stream.makeAsyncIterator()
-          guard let boundary = await events.next() else { throw CursorFixtureError.deadline }
-          return boundary
-        }
-        group.addTask {
-          try await Task.sleep(for: timeout)
-          throw CursorFixtureError.deadline
-        }
-        defer { group.cancelAll() }
-        guard let boundary = try await group.next() else { throw CursorFixtureError.deadline }
-        return boundary
-      }
-    }
-
-    func release() { permission.continuation.finish() }
+  enum CodingKeys: String, CodingKey {
+    case adapterPID = "adapter_pid"
+    case request, reply
   }
-#endif
+
+  var result: [String: JSONValue]? { reply?["result"]?.objectValue }
+}
 
 private final class CursorHarness: @unchecked Sendable {
   let base: FixedHostFixture
@@ -988,13 +876,14 @@ private final class CursorHarness: @unchecked Sendable {
     self.outside = outside
     self.owner = owner
   }
-  static func make(_ package: PluginPackage, caller: Int, provider: Bool, use: Bool) async throws
-    -> CursorHarness
-  {
+  static func make(
+    _ package: PluginPackage, caller: Int, provider: Bool, use: Bool, observeStartup: Bool
+  ) async throws -> CursorHarness {
     let base = try FixedHostFixture(fullAccess: false, lifecycle: true)
     let lifecycle = GatewayStandaloneGenerations(base.runtime)
     var pending: CursorHarness?
     var created: String?
+    var stage = "worktree and package registration"
     do {
       try await base.initializeRepository()
       let value = try cursorValue(
@@ -1017,6 +906,19 @@ private final class CursorHarness: @unchecked Sendable {
         fileURLWithPath: try #require(
           ProcessInfo.processInfo.environment["COMPUTER_MCP_CURSOR_PYTHON"])
       ).resolvingSymlinksInPath().path
+      let adapterPython: String
+      if observeStartup {
+        let launcher = base.root.appendingPathComponent("cursor-transport-python")
+        let fixture = package.root.appendingPathComponent(
+          "tests/Fixtures/vendor_start_transport.py")
+        let source = try String(contentsOf: fixture, encoding: .utf8)
+        try ("#!\(python)\n" + source).write(to: launcher, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+          [.posixPermissions: 0o755], ofItemAtPath: launcher.path)
+        adapterPython = launcher.path
+      } else {
+        adapterPython = python
+      }
       let fixture = package.root.appendingPathComponent("tests/Fixtures/vendor.py")
       let fixtureSource = try Data(contentsOf: fixture).map { String(format: "%02x", $0) }.joined()
       try """
@@ -1090,14 +992,14 @@ private final class CursorHarness: @unchecked Sendable {
               uniqueKeysWithValues: cursorReadTools.map { ($0, CapabilityRisk.readOnly) }))
         ],
         cli: ["agent": .init(registrationID: "cursor-cli")],
-        dependencyExecutables: ["cursor-agent": peer.path, "python-runtime": python])
+        dependencyExecutables: ["cursor-agent": peer.path, "python-runtime": adapterPython])
       _ = try await store.setSettings(
         settings, for: "cursor", expectedRevision: store.snapshot().revision)
       let plugin = try PluginResolver.resolve(
         package: runtimePackage, source: origin,
         settings: settings,
         dependencyExecutables: [
-          "cursor-agent": peer, "python-runtime": URL(fileURLWithPath: python),
+          "cursor-agent": peer, "python-runtime": URL(fileURLWithPath: adapterPython),
         ],
         hostVersion: PluginVersion(ComputerMCPCLI.version), architecture: PluginHost.architecture)
       try #require(
@@ -1118,9 +1020,12 @@ private final class CursorHarness: @unchecked Sendable {
       let adapterCommand = try #require(adapter.command)
       try #require(
         URL(fileURLWithPath: adapterCommand).resolvingSymlinksInPath()
-          == URL(fileURLWithPath: python).resolvingSymlinksInPath())
+          == URL(fileURLWithPath: adapterPython).resolvingSymlinksInPath())
+      try #require(adapter.args.count == 1)
+      let adapterPath = URL(fileURLWithPath: try #require(adapter.args.first))
+      let installedAdapter = runtimePackage.root.appendingPathComponent("bin/cursor-mcp-adapter")
       try #require(
-        adapter.args == [runtimePackage.root.appendingPathComponent("bin/cursor-mcp-adapter").path])
+        adapterPath.resolvingSymlinksInPath() == installedAdapter.resolvingSymlinksInPath())
       print(
         "Cursor fixture adapter launch: \(adapterCommand) \(adapter.args); native peer interpreter: \(python)"
       )
@@ -1135,6 +1040,7 @@ private final class CursorHarness: @unchecked Sendable {
       pending = h
       let lifecycleProfile = try #require(
         base.database.profiles().first { $0.id == base.configuration.runtime.profileID })
+      stage = "consumer generation"
       h.gateway = try h.makeConsumer("cursor-consumer", caller: caller, use: use)
       try #require(
         base.database.profiles().first { $0.id == lifecycleProfile.id } == lifecycleProfile)
@@ -1143,6 +1049,7 @@ private final class CursorHarness: @unchecked Sendable {
         try #require(beforeSettings == beforeRegistration)
       }
       try #require(try h.nativeStarts == 0)
+      stage = "provider approval"
       try fixtureApprovePlugin(
         runtimePackage, database: base.database, runtime: h.gateway.permissionRuntime,
         permissions: fixturePermissions([.project("fixture"): .granted(provider ? .write : .read)]))
@@ -1152,22 +1059,33 @@ private final class CursorHarness: @unchecked Sendable {
         })
       try #require(approval.enabled && approval.fullAccessConsent == nil)
       return h
-    } catch {
-      if let pending {
-        try await pending.close()
-      } else {
-        if let created {
-          _ = try await lifecycle.callToolForMCPAsync(
-            name: "git.worktree_remove",
-            arguments: .object(["project_id": .string(created), "force": .bool(true)]),
-            context: .init(session: base.session))
+    } catch let setupError {
+      print("Cursor fixture setup failed during \(stage) in \(base.root.path): \(setupError)")
+      do {
+        if let pending {
+          try await pending.close()
+        } else {
+          if let created {
+            _ = try cursorValue(
+              try await lifecycle.callToolForMCPAsync(
+                name: "git.worktree_remove",
+                arguments: .object(["project_id": .string(created), "force": .bool(true)]),
+                context: .init(session: base.session)))
+          }
+          await lifecycle.shutdown()
+          base.session.end()
+          await base.runtime.shutdown()
+          try FileManager.default.removeItem(at: base.root)
         }
-        await lifecycle.shutdown()
-        base.session.end()
-        await base.runtime.shutdown()
-        try FileManager.default.removeItem(at: base.root)
+      } catch {
+        if pending == nil {
+          await lifecycle.shutdown()
+          base.session.end()
+          await base.runtime.shutdown()
+        }
+        Issue.record("Cursor fixture setup cleanup failed in \(base.root.path): \(error)")
       }
-      throw error
+      throw setupError
     }
   }
   var nativeStarts: Int {
@@ -1277,137 +1195,276 @@ private final class CursorHarness: @unchecked Sendable {
         arguments: .object(["server": .string("cursor-fixture"), "request_id": .string(id)]),
         context: .empty))
   }
-  #if DEBUG
-    var vendorLaunches: [ExecutionObservations.Launch] {
-      base.observations.launches.filter { $0.executable != base.platform.gitExecutable }
+  func processOwner(_ member: ExecutionMember) throws -> any ExecutionOwnership {
+    try #require(base.observations.ownerships.first { (try? $0.recoveryState().root) == member })
+  }
+
+  func processMember(pid: Int32) throws -> ExecutionMember {
+    let matches = base.observations.members.filter { $0.processID == pid }
+    try #require(matches.count == 1)
+    return try #require(matches.first)
+  }
+
+  func peerMember(_ effect: [String: JSONValue]) throws -> ExecutionMember {
+    let pid = try #require(effect["pid"]?.intValue.flatMap(Int32.init(exactly:)))
+    return try processMember(pid: pid)
+  }
+
+  func lastWorkload() throws -> ExecutionMember {
+    try peerMember(try #require(try vendorEffects().last { $0["phase"] == .string("workload") }))
+  }
+
+  func requirePeerEvidence(_ root: ExecutionMember, phase: String) throws {
+    let matching = try vendorEffects().filter {
+      $0["phase"] == .string(phase) && $0["pid"] == .integer(Int64(root.processID))
     }
-    func withStartupBarrier(
-      _ barrier: CursorStartupBarrier<CursorStartupBoundary>, body: () async throws -> Void
-    ) async throws {
-      let observation = CursorVendorStartupObservation.shared
-      await observation.set({ await barrier.park($0) }, projectID: projectID)
-      do {
-        try await body()
-      } catch {
-        barrier.release()
-        await observation.set(nil, projectID: projectID)
-        throw error
+    try #require(matching.count == 1)
+    try #require(try peerMember(try #require(matching.first)) == root)
+  }
+
+  func waitStartedWorkload(_ boundary: CursorStartupBoundary) async throws -> ExecutionMember {
+    let deadline = ContinuousClock.now + .seconds(4)
+    repeat {
+      let workload = try startupChildren(boundary).workload
+      if let root = workload.recovery?.root,
+        try vendorEffects().contains(where: {
+          $0["phase"] == .string("workload") && $0["pid"]?.intValue == Int(root.processID)
+        })
+      {
+        try #require(!workload.completed && workload.recovery?.sandboxed == true)
+        try requirePeerEvidence(root, phase: "workload")
+        return root
       }
-      await observation.set(nil, projectID: projectID)
+      try await Task.sleep(for: .milliseconds(20))
+    } while ContinuousClock.now < deadline
+    throw CursorFixtureError.deadline
+  }
+
+  func verifySiblingIO(_ session: String, root: ExecutionMember, suffix: String) async throws
+    -> String
+  {
+    let fixture = worktree.appendingPathComponent("cursor-sibling-io")
+    let initial = "owner-provided-\(suffix):"
+    try Data(initial.utf8).write(to: fixture)
+    let promptText = "worktree-io:\(suffix)"
+    let reply = try cursorValue(try await prompt(session, promptText))
+    try #require(
+      reply["session"] == .string(session) && reply["stop_reason"] == .string("end_turn"))
+    try #require(reply["text"] == .string(initial))
+    try #require(try String(contentsOf: fixture, encoding: .utf8) == initial + suffix)
+    try await waitVendorPrompt(pid: root.processID, prompt: promptText)
+    let owner = try processOwner(root)
+    try #require(try await owner.members().contains(root))
+    return promptText
+  }
+
+  private var transportDirectory: URL {
+    get throws {
+      let home = try base.database.prepareProviderContainer(.package("cursor")).sandbox.home
+      return URL(fileURLWithPath: home.value).appendingPathComponent("cursor-start-transport")
     }
-    func withVendorReplyObserver(
-      _ observe: @escaping @Sendable (CursorStartupReply) async -> Bool,
-      release: () -> Void,
-      body: () async throws -> Void
-    ) async throws {
-      let observation = CursorVendorStartupObservation.shared
-      await observation.setReplyObserver(observe, projectID: projectID)
-      do {
-        try await body()
-      } catch {
-        release()
-        await observation.setReplyObserver(nil, projectID: projectID)
-        throw error
+  }
+
+  func armStartupFault(_ fault: String) throws {
+    try fault.write(
+      to: transportDirectory.appendingPathComponent("fault"), atomically: true, encoding: .utf8)
+  }
+
+  func releaseTransport(_ name: String) throws {
+    try Data().write(
+      to: transportDirectory.appendingPathComponent(name + ".release"), options: .atomic)
+  }
+
+  func requireNoTransportEvent(_ name: String) throws {
+    let path = try transportDirectory.appendingPathComponent(name + ".json")
+    try #require(!FileManager.default.fileExists(atPath: path.path))
+  }
+
+  func waitTransport(_ name: String, timeout: Duration = .seconds(7)) async throws
+    -> CursorTransportEvent
+  {
+    let path = try transportDirectory.appendingPathComponent(name + ".json")
+    let deadline = ContinuousClock.now + timeout
+    repeat {
+      if FileManager.default.fileExists(atPath: path.path) {
+        let event = try JSONDecoder().decode(
+          CursorTransportEvent.self, from: Data(contentsOf: path))
+        if let reply = event.reply { try #require(reply["id"] == event.request["id"]) }
+        return event
       }
-      release()
-      await observation.setReplyObserver(nil, projectID: projectID)
+      try await Task.sleep(for: .milliseconds(20))
+    } while ContinuousClock.now < deadline
+    Issue.record("Cursor fixture did not observe \(name)")
+    throw CursorFixtureError.deadline
+  }
+
+  func startOpen(_ id: String) async throws -> [String: JSONValue] {
+    let started = try cursorValue(
+      try await call(
+        "cursor.acp.session.open", ["permission_policy": .string("manual")], startRequestID: id))
+    try #require(started["request_id"] == .string(id) && started["state"] == .string("running"))
+    return started
+  }
+
+  func startupBoundary(_ launch: CursorTransportEvent) async throws -> CursorStartupBoundary {
+    let bind = try await waitTransport("bind")
+    let probe = try await waitTransport("probe")
+    let binding = try #require(bind.result)
+    let acquisition = try #require(
+      launch.request["acquisition"]?.stringValue.flatMap { UUID(uuidString: $0) })
+    let probeID = try #require(binding["probe"]?.stringValue.flatMap { UUID(uuidString: $0) })
+    let workloadID = try #require(binding["workload"]?.stringValue.flatMap { UUID(uuidString: $0) })
+    try #require(
+      launch.request["op"] == .string("launch") && launch.request["child"] == binding["workload"])
+    try #require(bind.request["op"] == .string("bind") && probe.request["op"] == .string("probe"))
+    try #require(probe.request["child"] == binding["probe"])
+    for event in [bind, probe, launch] {
+      try #require(event.adapterPID == launch.adapterPID)
+      try #require(event.request["acquisition"] == launch.request["acquisition"])
+      try #require(event.request["call"] == launch.request["acquisition"])
     }
-    func startupChildren(_ boundary: CursorStartupBoundary) throws
-      -> (probe: ExecutionRuntimeRecord.Child, workload: ExecutionRuntimeRecord.Child)
-    {
-      try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
-        try #require(ledger.executions[boundary.executionID]?.delegatedTo == .package("cursor"))
-        let record = try #require(try ExecutionRuntimeRecord.load(boundary.executionID, database))
-        let probe = try #require(record.children[boundary.probeID])
-        let workload = try #require(record.children[boundary.workloadID])
+    let adapter = try processMember(pid: launch.adapterPID)
+    try #require(try processOwner(adapter).recoveryState().sandboxed)
+    let matching = try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
+      try ledger.executions.values.compactMap { execution -> UUID? in
+        guard execution.delegatedTo == .package("cursor"),
+          let record = try ExecutionRuntimeRecord.load(execution.id, database),
+          record.children[probeID] != nil, record.children[workloadID] != nil
+        else { return nil }
         try #require(record.children.count == 2)
-        return (probe, workload)
+        return execution.id
       }
     }
-    func workloadJournal(_ boundary: CursorStartupBoundary) throws -> ExecutionRecoveryJournal.Entry
-    {
-      let path = base.database.permissionExecutionRoot.appendingPathComponent("ownership")
-        .appendingPathComponent(boundary.workloadID.uuidString + ".json")
-      let entry = try JSONDecoder().decode(
-        ExecutionRecoveryJournal.Entry.self, from: Data(contentsOf: path))
-      try #require(entry.child == boundary.workloadID && entry.execution == boundary.executionID)
-      try #require(entry.recovery.sandboxed)
-      return entry
+    try #require(matching.count == 1)
+    let execution = try #require(matching.first)
+    let boundary = CursorStartupBoundary(
+      acquisitionID: acquisition, executionID: execution, probeID: probeID, workloadID: workloadID,
+      adapter: adapter)
+    let receipt = try startupReply(probe, boundary: boundary)
+    try #require(
+      receipt["probe_state"] == .string("retired") && receipt["probe_settled"] == .bool(true))
+    try #require(receipt["workload_settled"] == .bool(false))
+    return boundary
+  }
+
+  func startupReply(_ event: CursorTransportEvent, boundary: CursorStartupBoundary) throws
+    -> [String: JSONValue]
+  {
+    let value = try #require(event.result)
+    try #require(
+      event.request["acquisition"] == .string(boundary.acquisitionID.uuidString.lowercased()))
+    try #require(value["probe"] == .string(boundary.probeID.uuidString.lowercased()))
+    try #require(value["workload"] == .string(boundary.workloadID.uuidString.lowercased()))
+    return value
+  }
+
+  func requireNewRequest(_ event: CursorTransportEvent, after earlier: CursorTransportEvent) throws
+  {
+    let newerID = try #require(event.request["id"]?.intValue)
+    let earlierID = try #require(earlier.request["id"]?.intValue)
+    try #require(newerID > earlierID)
+    for field in ["acquisition", "call", "child"] {
+      try #require(event.request[field] == earlier.request[field])
     }
-    func waitForNewWorkload(since index: Int) async throws -> Int32 {
-      let deadline = ContinuousClock.now + .seconds(5)
-      repeat {
-        if let launch = vendorLaunches.dropFirst(index).first(where: { $0.arguments == ["acp"] }) {
-          let pid = launch.member.processID
-          if try vendorEffects().contains(where: {
-            $0["phase"] == .string("workload") && $0["pid"]?.intValue == Int(pid)
-          }) {
-            try #require(launch.sandboxed)
-            return pid
-          }
-        }
-        try await Task.sleep(for: .milliseconds(20))
-      } while ContinuousClock.now < deadline
-      throw CursorFixtureError.deadline
+  }
+
+  func startupChildren(_ boundary: CursorStartupBoundary) throws
+    -> (probe: ExecutionRuntimeRecord.Child, workload: ExecutionRuntimeRecord.Child)
+  {
+    try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
+      try #require(ledger.executions[boundary.executionID]?.delegatedTo == .package("cursor"))
+      let record = try #require(try ExecutionRuntimeRecord.load(boundary.executionID, database))
+      let probe = try #require(record.children[boundary.probeID])
+      let workload = try #require(record.children[boundary.workloadID])
+      try #require(record.children.count == 2)
+      return (probe, workload)
     }
-    func vendorRequestOwner(_ id: String) async throws -> (locator: JSONValue, connectionID: UUID) {
-      // A parked request has a host lease before the adapter can report a session resource.
-      let live = gateway.ownedWork.snapshot.filter { $0.kind == .mcpRequest && $0.resourceID == id }
-      try #require(
-        live.count == 1, "Pending MCP request \(id) in \(projectID), host leases \(live)")
-      let request = try #require(live.first)
-      try #require(request.projectID == projectID && request.registrationID == "cursor-fixture")
-      let connectionID = try #require(request.connectionID)
-      let report = try cursorValue(
-        try await gateway.callToolForMCPAsync(
-          name: "runtime.owners.list",
-          arguments: .object([
-            "project_id": .string(projectID), "server": .string("cursor-fixture"),
-          ]), context: .empty))
-      let owners = try #require(report["owners"]?.arrayValue)
-      let matches = owners.compactMap(\.objectValue).filter {
-        $0["kind"] == .string("mcpRequest") && $0["resource_id"] == .string(id)
-      }
-      let visible = owners.prefix(8).compactMap(\.objectValue).map {
-        [$0["kind"], $0["resource_id"], $0["connection_id"]]
-      }
-      try #require(
-        matches.count == 1, "Pending MCP request \(id) in \(projectID), public owners \(visible)")
-      let row = try #require(matches.first)
-      try #require(row["server"] == .string("cursor-fixture"))
-      try #require(row["connection_id"] == .string(connectionID.uuidString))
-      let locator = try #require(row["owner"])
-      let selected = try GatewayOwnerSelection(locator)
-      try #require(selected.runtimeID == gateway.generationID && selected.projectID == projectID)
-      try #require(selected.ownershipID == request.id)
-      print(
-        "Cursor startup request \(id) is owned by \(request.id) in \(projectID), connection \(connectionID)"
-      )
-      return (locator, connectionID)
+  }
+
+  func phaseJournal(_ child: UUID, boundary: CursorStartupBoundary) throws
+    -> ExecutionRecoveryJournal.Entry
+  {
+    let path = base.database.permissionExecutionRoot.appendingPathComponent("ownership")
+      .appendingPathComponent(child.uuidString + ".json")
+    let entry = try JSONDecoder().decode(
+      ExecutionRecoveryJournal.Entry.self, from: Data(contentsOf: path))
+    try #require(entry.child == child && entry.execution == boundary.executionID)
+    try #require(entry.recovery.sandboxed)
+    return entry
+  }
+
+  func requireNeverLaunched(_ boundary: CursorStartupBoundary, probe: ExecutionMember) async throws
+  {
+    let stopped = try startupChildren(boundary)
+    try #require(stopped.probe.completed && stopped.probe.recovery?.root == probe)
+    try #require(stopped.workload.completed && stopped.workload.recovery == nil)
+    let durable = try phaseJournal(boundary.probeID, boundary: boundary)
+    try #require(durable.completed && durable.recovery.root == probe)
+    let missing = base.database.permissionExecutionRoot.appendingPathComponent("ownership")
+      .appendingPathComponent(boundary.workloadID.uuidString + ".json")
+    try #require(!FileManager.default.fileExists(atPath: missing.path))
+    let owner = try processOwner(probe)
+    try #require(try await owner.members().isEmpty)
+  }
+
+  func startupEvidence(
+    _ boundary: CursorStartupBoundary, requestID: String, downstream: String
+  ) -> [String: Any] {
+    [
+      "request_id": requestID, "downstream_request_id": downstream,
+      "acquisition": boundary.acquisitionID.uuidString,
+      "execution": boundary.executionID.uuidString,
+      "probe": boundary.probeID.uuidString, "workload": boundary.workloadID.uuidString,
+    ]
+  }
+
+  func vendorRequestOwner(_ id: String) async throws -> (locator: JSONValue, connectionID: UUID) {
+    // A parked request has a host lease before the adapter can report a session resource.
+    let live = gateway.ownedWork.snapshot.filter { $0.kind == .mcpRequest && $0.resourceID == id }
+    try #require(
+      live.count == 1, "Pending MCP request \(id) in \(projectID), host leases \(live)")
+    let request = try #require(live.first)
+    try #require(request.projectID == projectID && request.registrationID == "cursor-fixture")
+    let connectionID = try #require(request.connectionID)
+    let report = try cursorValue(
+      try await gateway.callToolForMCPAsync(
+        name: "runtime.owners.list",
+        arguments: .object([
+          "project_id": .string(projectID), "server": .string("cursor-fixture"),
+        ]), context: .empty))
+    let owners = try #require(report["owners"]?.arrayValue)
+    let matches = owners.compactMap(\.objectValue).filter {
+      $0["kind"] == .string("mcpRequest") && $0["resource_id"] == .string(id)
     }
-    func closeVendorConnection(_ owner: (locator: JSONValue, connectionID: UUID)) async throws
-      -> [String: JSONValue]
-    {
-      try cursorValue(
-        try await gateway.callToolForMCPAsync(
-          name: "runtime.owners.call",
-          arguments: .object([
-            "project_id": .string(projectID), "owner": owner.locator,
-            "tool": .string("mcp.connections.close"),
-            "arguments": .object(["server": .string("cursor-fixture")]),
-          ]), context: .empty))
+    let visible = owners.prefix(8).compactMap(\.objectValue).map {
+      [$0["kind"], $0["resource_id"], $0["connection_id"]]
     }
-    func waitForStartupDrain(_ boundary: CursorStartupBoundary) async throws {
-      let deadline = ContinuousClock.now + .seconds(7)
-      repeat {
-        if await boundary.channelClosed(), boundary.receipts().workload == "never_dispatched" {
-          return
-        }
-        try await Task.sleep(for: .milliseconds(20))
-      } while ContinuousClock.now < deadline
-      throw CursorFixtureError.deadline
-    }
-  #endif
+    try #require(
+      matches.count == 1, "Pending MCP request \(id) in \(projectID), public owners \(visible)")
+    let row = try #require(matches.first)
+    try #require(row["server"] == .string("cursor-fixture"))
+    try #require(row["connection_id"] == .string(connectionID.uuidString))
+    let locator = try #require(row["owner"])
+    let selected = try GatewayOwnerSelection(locator)
+    try #require(selected.runtimeID == gateway.generationID && selected.projectID == projectID)
+    try #require(selected.ownershipID == request.id)
+    print(
+      "Cursor startup request \(id) is owned by \(request.id) in \(projectID), connection \(connectionID)"
+    )
+    return (locator, connectionID)
+  }
+  func closeVendorConnection(_ owner: (locator: JSONValue, connectionID: UUID)) async throws
+    -> [String: JSONValue]
+  {
+    try cursorValue(
+      try await gateway.callToolForMCPAsync(
+        name: "runtime.owners.call",
+        arguments: .object([
+          "project_id": .string(projectID), "owner": owner.locator,
+          "tool": .string("mcp.connections.close"),
+          "arguments": .object(["server": .string("cursor-fixture")]),
+        ]), context: .empty))
+  }
   func waitRequestReceipt(_ id: String) async throws -> [String: JSONValue] {
     let deadline = ContinuousClock.now + .seconds(5)
     repeat {
@@ -1541,7 +1598,7 @@ private final class CursorHarness: @unchecked Sendable {
     }
   }
   func verifyAcquisitions(
-    first: [ExecutionObservations.Launch], second: [ExecutionObservations.Launch], adapterPID: Int32
+    first: [ExecutionMember], second: [ExecutionMember], adapter: ExecutionMember
   ) throws -> [[String: Any]] {
     try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
       var rows: [[String: Any]] = []
@@ -1549,7 +1606,7 @@ private final class CursorHarness: @unchecked Sendable {
       var proofs: Set<UUID> = []
       var children: Set<UUID> = []
       for pair in [first, second] {
-        let pids = Set(pair.map { $0.member.processID })
+        let pids = Set(pair)
         var matched = false
         for execution in ledger.executions.values where execution.delegatedTo == .package("cursor")
         {
@@ -1557,7 +1614,7 @@ private final class CursorHarness: @unchecked Sendable {
             continue
           }
           let slots = record.children.filter { _, record in
-            record.recovery.map { pids.contains($0.root.processID) } ?? false
+            record.recovery.map { pids.contains($0.root) } ?? false
           }
           guard slots.count == 2 else { continue }
           let newExecution = executions.insert(execution.id).inserted
@@ -1574,20 +1631,27 @@ private final class CursorHarness: @unchecked Sendable {
           }
           if rows.isEmpty {
             try #require(
-              record.children.values.contains { $0.recovery?.root.processID == adapterPID })
+              record.children.values.count == 3
+                && record.children.values.contains {
+                  $0.recovery?.root == adapter && $0.recovery?.sandboxed == true
+                })
           } else {
             try #require(record.children.count == 2)
           }
-          let phaseIDs = try pair.map { launch in
-            try #require(slots.first(where: { $0.value.recovery?.root == launch.member })?.key)
+          let phaseIDs = try pair.map { root in
+            let pair = try #require(slots.first { $0.value.recovery?.root == root })
+            try #require(pair.value.recovery?.sandboxed == true)
+            return pair.key
           }
+          try #require(slots[phaseIDs[0]]?.completed == true)
+          try #require(slots[phaseIDs[1]]?.completed == false)
           rows.append([
             "execution": execution.id.uuidString,
             "authorization_ids": execution.authorizationIDs.map(\.uuidString).sorted(),
-            "adapter_pid": adapterPID,
-            "probe_pid": pair[0].member.processID,
+            "adapter_pid": adapter.processID,
+            "probe_pid": pair[0].processID,
             "probe_child": phaseIDs[0].uuidString,
-            "workload_pid": pair[1].member.processID,
+            "workload_pid": pair[1].processID,
             "workload_child": phaseIDs[1].uuidString,
           ])
         }
@@ -1642,7 +1706,7 @@ private final class CursorHarness: @unchecked Sendable {
   }
   func requireJoined() async throws {
     for _ in 0..<200 {
-      try await gateway.permissionRuntime.coordinator.reconcile()
+      try await (gateway ?? base.runtime).permissionRuntime.coordinator.reconcile()
       var live = false
       for ownership in base.observations.ownerships {
         if try await ownership.members().isEmpty == false { live = true }
@@ -1655,12 +1719,19 @@ private final class CursorHarness: @unchecked Sendable {
   func close() async throws {
     await gateway?.shutdown()
     await other?.shutdown()
-    if !removed { try await removeWorktree() }
-    try await requireJoined()
-    try await base.requireNoScratch()
+    let cleanupError: (any Error)?
+    do {
+      if !removed { try await removeWorktree() }
+      try await requireJoined()
+      try await base.requireNoScratch()
+      cleanupError = nil
+    } catch {
+      cleanupError = error
+    }
     await lifecycle.shutdown()
     base.session.end()
     await base.runtime.shutdown()
+    if let cleanupError { throw cleanupError }
     try FileManager.default.removeItem(at: base.root)
     try #require(!FileManager.default.fileExists(atPath: base.root.path))
   }

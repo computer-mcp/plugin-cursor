@@ -101,6 +101,12 @@ for line in sys.stdin:
         elif prompt.startswith('boundaries:'):
             update(json.dumps(boundaries(json.loads(prompt[len('boundaries:'):]))))
             finish(identifier)
+        elif prompt.startswith('worktree-io:') and os.environ.get('CURSOR_SOURCE_FIXTURE') == '1':
+            marker = Path('cursor-sibling-io')
+            previous = marker.read_text()
+            marker.write_text(previous + prompt.removeprefix('worktree-io:'))
+            update(previous)
+            finish(identifier)
         elif prompt=='env':
             update(json.dumps([k for k in os.environ if k.startswith('COMPUTER_MCP_')]))
             finish(identifier)
