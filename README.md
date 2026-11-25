@@ -34,7 +34,7 @@ vendor behavior needs no host release.
 The CLI contribution describes verified non-interactive commands; the native baseline and its
 exact version assertion live in `cli-tree.json`. It is deliberately partial: interactive setup,
 installation and unsupported administrative flows are not callable tools. The adapter owns
-streaming and session and run state. The host owns registration, profile grants, the initial
+streaming and session and run state. The host owns registration, provider/caller grants, private containers, the initial
 working directory and audit.
 
 ## Quick look
@@ -61,9 +61,12 @@ from `Examples/settings.json`.
 3. Install the ZIP through Computer MCP's plugin UI or the owner CLI. Installation is neither
    activation nor a permission grant.
 4. Review `Examples/settings.json`, replace its placeholder paths, and configure the plugin
-   through the same UI or `plugins configure`. The CLI dependency binding selects the executable
-   for the CLI contribution; the MCP launch `args` supply `--executable` for the adapter. Point
-   both at the same verified installation.
+   through the same UI or `plugins configure`. The `cursor-agent` dependency selects the
+   executable for the CLI and Host-managed ACP contributions.
+
+Review the provider Project-write purpose and MCP caller requirements in the manifest.
+The offline draft uses sandbox mode with network none and no user-config read exceptions;
+native login/network/config and execution-mode acceptance remain pending owner decisions.
 
 See the [installation guide](docs/Reference/Installation.md) for revisions, configuration
 publication and validation.
@@ -106,7 +109,10 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 scripts/validate_native.py --executable /absolute/path/to/agent
 ```
 
-Tests use deterministic peers, not a model. Authenticated execution and production activation are
+The [source consumer](docs/Reference/Installation.md#deterministic-source-consumer)
+takes explicit clean full-SHA host/plugin inputs and exercises all three contributions
+with isolated host-owned state. Its native host execution and the final host pin remain
+integration acceptance steps. Tests use deterministic peers, not a model. Authenticated execution and production activation are
 separate acceptance steps.
 
 ## Contributing

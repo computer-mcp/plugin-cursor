@@ -8,6 +8,27 @@ The CLI contribution preserves the declared argv order, optional native flags an
 
 The MCP adapter implements standard newline-delimited JSON-RPC over stdio, with MCP initialization, tools/list, tools/call, ping and cancellation notifications. Supported MCP dates are 2024-11-05, 2025-03-26 and 2025-06-18. An unsupported proposed date receives the adapter's supported date rather than an unimplemented echo. Tool results use `structuredContent.result`; tool failures set `isError` and include an error code. Protocol errors remain JSON-RPC errors. Tool schemas are the callable source of truth.
 
+## Reviewed provider and caller permissions
+
+The manifest requests provider Project write to open Cursor sessions and run requested
+project tasks in owner-selected worktrees. MCP callers need Project write by default.
+Exactly `cursor.acp.session.prompt.result`, `cursor.acp.session.list`,
+`cursor.acp.events.read` and `cursor.acp.requests.list` require Project read.
+These complete per-tool overrides replace the manifest default; host effect requirements
+remain additive. Cancellation, close, mode and native-response delivery require write.
+Both caller authority and provider authority must admit the effect. Plugin use alone
+does not authorize project execution. Runtime metadata never sets caller requirements.
+CLI invocation retains Project write plus Plugin use; Skills consumption retains Skills
+plus Plugin use. Shipping a skill does not request provider Skills authority.
+
+The offline draft omits sandbox declarations: sandbox mode, network none and no existing
+user-config read exceptions. Provider HOME/cache/state are host-provisioned persistent
+container paths; temporary storage is execution-local. The host selects the worktree,
+protects unrelated projects/host data/other containers and retires writers before removal.
+This adapter does not request `projects-v1` or perform host lifecycle calls. Native login,
+config reads, network and any Full access choice require measured facts and an owner
+decision. The deterministic fixture does not establish real-model suitability.
+
 ## Host risk metadata
 
 Every MCP tool declares `_meta["io.github.computer-mcp/risk"]`. Model execution
@@ -56,6 +77,17 @@ work. The adapter does not require resource subscriptions; hosts may poll.
 See the host's [provider work contract](https://github.com/computer-mcp/computer-mcp/blob/master/Documentation/Reference/MCPProtocol.md#downstream-provider-work)
 for acquisition expiry, snapshot validation and host-side uncertainty.
 
+## Vendor execution
+
+Computer MCP runs the registered ACP contribution using the reviewed
+`cursor-vendor-execution.json` signature. It selects the `cursor-agent`
+dependency, verifies the version probe, and owns the separate probe and
+workload children for each acquisition. The adapter negotiates the private
+vendor channel before advertising managed execution. Managed startup requires
+that channel and does not fall back to launching a local child. Standalone
+stdio clients use the local supervisor and select the executable through
+`--executable`, `CURSOR_AGENT_EXECUTABLE`, or PATH.
+
 ## Tools
 
 | Native MCP tool | Behavior |
@@ -89,13 +121,25 @@ The default permission policy is `reject-once`. Explicit `allow-once`/`allow-alw
 
 Question answers must use the offered question and option IDs and obey single/multiple selection. Plans accept `accepted`, `rejected` or `cancelled` and their documented optional fields. Duplicate, stale and unoffered replies fail. Each request is bound to its active native operation and session; response delivery and operation retirement are serialized. Unknown vendor requests receive method-not-found, not fabricated success.
 
+A definitive Host refusal before writing returns `response_refused`. The active
+turn retains ownership of its pending request through stop or completion.
+Unknown delivery returns `response_unknown` and retires the affected session
+without replaying the answer.
+
 ## Bounds, cancellation and failures
 
 An ACP frame is bounded to 1 MiB before waiting for a newline. Event retention is bounded by both 256 events and 256 KiB. Text accumulation and its serialized JSON value are each bounded to 128 KiB; omissions/truncation are reported. Pages use absolute cursors, `next_cursor`, `has_more` and `missed_events`. An event larger than the requested page becomes explicit omission metadata so pagination can progress. Responses retain the bounded native prompt result; absent stopReason is an error, and native cancellation is not successful task completion.
 
-Prompts default to 300 seconds and accept up to 1800 seconds. Session setup defaults to 45 seconds. Transport startup and cleanup can add bounded latency. Pending requests expire with their native operation. Cancellation sends ACP session/cancel, waits for native settlement, and retires the owned process if it cannot settle within its grace period. A cancelled background request is not automatically replayed. Cancelling the start call after it returned does not identify the background task: use the returned session/prompt handle.
+Prompts default to 300 seconds and accept up to 1800 seconds. Session setup defaults to 45 seconds. Transport startup and cleanup can add bounded latency. Pending requests expire with their native operation. Cancellation of a dispatched prompt sends ACP `session/cancel` once and waits up to two seconds for the correlated reply. The adapter preserves a native cancellation, a completion that won the race, or a native error. A settled cancellation or completion permits session reuse. A correlated managed prompt error also leaves the session available. If managed cancellation cannot settle within the grace period, the adapter retires the affected session and reports `cancellation_unsettled`. A cancelled background request is not automatically replayed. To cancel background work after the start call returns, select its session handle.
 
-The private supervisor observes adapter EOF/termination and owns the vendor process group. It retains the leader until termination and reaping, then sends a separate bounded cleanup acknowledgement. Missing acknowledgement is `cleanup_unconfirmed`, never a clean success inferred from exit alone. A session with unconfirmed cleanup remains retained and counts against admission capacity; repeating close cannot erase the failure. Escaped, independently reparented processes are not claimed as owned. Host callback descriptors/COMPUTER_MCP metadata are not forwarded to the vendor. The process working directory is not an OS sandbox.
+For managed execution, the Host supplies cleanup receipts for both child phases.
+An unconfirmed start is reconciled against its existing reservation. Standalone
+execution uses a private supervisor that observes adapter EOF or termination.
+It retains the process group leader until termination and reaping, then sends
+a separate cleanup acknowledgment. A session with unconfirmed cleanup remains
+charged against capacity. Vendor processes receive neither the private channel
+nor reserved Host environment metadata. The working directory alone provides
+no sandbox enforcement.
 
 Representative errors include invalid_arguments, unknown_session, busy, incompatible_vendor, vendor_failed, invalid_vendor_response, frame_too_large, result_too_large, timeout, cancelled and cleanup_unconfirmed. Failed/unknown writes are not automatically retried. Native output may contain sensitive user content; callers must handle it accordingly.
 

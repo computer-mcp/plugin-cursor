@@ -15,3 +15,12 @@ Do not commit caches, local credentials or generated runtime state. Publishing a
 
 Contributions are licensed under this repository's [LICENSE](LICENSE),
 FSL-1.1-ALv2.
+
+Manifest caller requirements must agree with the actual adapter catalog; run
+`python3 -m unittest discover -s tests -p 'test_declarations.py' -v` and
+`python3 -m unittest discover -s tests -p 'test_host_source.py' -v` for focused checks.
+The exact-source consumer and separate archive identity check are documented in the
+[installation guide](docs/Reference/Installation.md). Use only clean reviewed full-SHA
+pairs; never direct plugin commands to an implicit App control socket. The deterministic
+fixture preserves native permission choices and does not establish authentication or
+real-model sandbox suitability. CI host acquisition awaits the reviewed host pin.

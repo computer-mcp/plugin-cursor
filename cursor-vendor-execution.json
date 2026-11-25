@@ -1,0 +1,8 @@
+{
+  "capability": "io.github.computer-mcp/vendor-execution-v1",
+  "dependency": "cursor-agent",
+  "acquire": ["cursor.acp.session.open", "cursor.acp.prompt"],
+  "probe": ["--version"],
+  "workload": ["acp"],
+  "version_stdout": "2026.05.04-08e5280\n"
+}

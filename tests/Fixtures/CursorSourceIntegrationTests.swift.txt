@@ -1,0 +1,1668 @@
+import ComputerMCPMacOS
+import ComputerMCPPermissions
+import ComputerMCPTestSupport
+import Foundation
+import Testing
+
+@testable import ComputerMCPConfiguration
+@testable import ComputerMCPCore
+@testable import ComputerMCPGateway
+@testable import ComputerMCPPlugins
+
+private let cursorReadTools: Set<String> = [
+  "cursor.acp.session.prompt.result", "cursor.acp.session.list",
+  "cursor.acp.events.read", "cursor.acp.requests.list",
+]
+private let cursorWriteTools: Set<String> = [
+  "cursor.acp.prompt", "cursor.acp.session.open", "cursor.acp.session.prompt",
+  "cursor.acp.session.prompt.start", "cursor.acp.session.mode", "cursor.acp.requests.respond",
+  "cursor.acp.session.cancel", "cursor.acp.session.close",
+]
+
+@Suite(.nativeIntegration, .serialized, .timeLimit(.minutes(5)))
+struct CursorSourceIntegrationTests {
+  @Test func registeredVendorStop() async throws {
+    let env = ProcessInfo.processInfo.environment
+    _ = try #require(env["COMPUTER_MCP_CURSOR_ARCHIVE"])
+    _ = try #require(env["COMPUTER_MCP_CURSOR_ARCHIVE_SHA256"])
+    let source = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_PLUGIN"]))
+    let package = try PluginPackage.load(at: source)
+    for (caller, provider) in [(1, true), (2, false)] {
+      try await withCursor(package, caller: caller, provider: provider) { h in
+        try await h.discover()
+        let before = h.base.observations.launches.count
+        let denied = try await h.call("cursor.acp.session.open")
+        try cursorDenied(denied)
+        try #require(
+          denied.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]
+            == .string("permission.required"))
+        try #require(h.base.observations.launches.count == before)
+        print(
+          "Cursor gate denial preserved (caller write: \(caller == 2), provider write: \(provider))"
+        )
+      }
+    }
+
+    var measured: [[String: Any]] = []
+    try await withCursor(package) { h in
+      func providerLaunches() -> [ExecutionObservations.Launch] {
+        h.base.observations.launches.filter { $0.executable != h.base.platform.gitExecutable }
+      }
+      try await h.discover()
+      let cold = providerLaunches().count
+      let a = try await h.open()
+      let warm = providerLaunches().count
+      let b = try await h.open()
+      let launches = providerLaunches()
+      let first = Array(launches.dropFirst(cold).prefix(warm - cold))
+      let second = Array(launches.dropFirst(warm))
+      try #require(first.count == 3, "\(first)")
+      try #require(second.count == 2, "\(second)")
+      let adapter = try #require(first.first)
+      try #require(adapter.arguments.last == "--host-vendor-execution")
+      try #require(first.dropFirst().map(\.arguments) == [["--version"], ["acp"]])
+      try #require(second.map(\.arguments) == [["--version"], ["acp"]])
+      let allLaunchesSandboxed = (first + second).allSatisfy { $0.sandboxed }
+      try #require(allLaunchesSandboxed)
+      measured = try h.verifyAcquisitions(
+        first: Array(first.dropFirst()), second: second, adapterPID: adapter.member.processID)
+      let aPID = try #require(first.last?.member.processID)
+      let bPID = try #require(second.last?.member.processID)
+      print("Cursor gate acquired A \(aPID) and B \(bPID) in adapter \(adapter.member.processID)")
+      print(
+        "Cursor gate binaries \(adapter.executable) / \(first[1].executable) / \(second[0].executable)"
+      )
+      let aOwner = try #require(
+        h.base.observations.ownerships.first {
+          (try? $0.recoveryState().root.processID) == aPID
+        })
+      let bOwner = try #require(
+        h.base.observations.ownerships.first {
+          (try? $0.recoveryState().root.processID) == bPID
+        })
+      let noFD = try cursorValue(try await h.prompt(a, "env"))
+      try #require(noFD["text"] == .string("[]"))
+      let outside = String(
+        decoding: try JSONSerialization.data(withJSONObject: h.outside.map(\.path)),
+        as: UTF8.self)
+      _ = try cursorValue(try await h.prompt(a, "boundaries:" + outside))
+      let allowed = h.worktree.appendingPathComponent("cursor-selected-write")
+      try #require(try String(contentsOf: allowed, encoding: .utf8) == "written")
+      for url in h.outside {
+        try #require(try String(contentsOf: url, encoding: .utf8) == "sentinel")
+      }
+
+      async let normal = h.prompt(a, "slow")
+      try await h.waitVendorPrompt(pid: aPID, prompt: "slow")
+      let normalStop = try await h.stop(a)
+      try #require(try cursorValue(normalStop)["cancel_requested"] == .bool(true))
+      let normalReply = try await normal
+      h.reportStop(pid: aPID, prompt: "slow", stop: normalStop, reply: normalReply)
+      let stopped = try cursorNativeValue(normalReply)
+      try #require(stopped["stop_reason"] == .string("cancelled"))
+      try #require(
+        stopped["native_result"]?.objectValue?["usage"]?.objectValue?["tokens"] == .integer(3))
+      try #require(try await aOwner.members().contains(where: { $0.processID == aPID }))
+      _ = try cursorValue(try await h.prompt(a, "hello after cancellation"))
+
+      async let interactive = h.prompt(a, "permission-on-cancel")
+      _ = try await h.waitPending(a)
+      let beforeAnswer = try h.vendorEffects().count
+      let interactiveStop = try cursorValue(try await h.stop(a))
+      try #require(interactiveStop["cancel_requested"] == .bool(true))
+      let interactiveResult = try cursorNativeValue(try await interactive)
+      try #require(interactiveResult["stop_reason"] == .string("cancelled"))
+      let answers = try h.vendorEffects().dropFirst(beforeAnswer).filter {
+        $0["phase"] == .string("answer") && $0["pid"]?.intValue == Int(aPID)
+      }
+      try #require(
+        answers.compactMap { $0["response"] } == [
+          .object(["outcome": .object(["outcome": .string("cancelled")])])
+        ])
+      let pendingAfterStop = try cursorValue(
+        try await h.call("cursor.acp.requests.list", ["session": .string(a)]))
+      try #require(pendingAfterStop["requests"] == .array([]))
+      _ = try cursorValue(try await h.prompt(a, "hello after pending cancellation"))
+
+      async let nativeError = h.prompt(a, "error-on-cancel")
+      try await h.waitVendorPrompt(pid: aPID, prompt: "error-on-cancel")
+      let errorStop = try await h.stop(a)
+      _ = try cursorValue(errorStop)
+      let errorReply = try await nativeError
+      h.reportStop(pid: aPID, prompt: "error-on-cancel", stop: errorStop, reply: errorReply)
+      let error = try cursorNativeValue(errorReply)["error"]?.objectValue
+      try #require(error?["code"] == .string("vendor_error"))
+      try #require(error?["message"]?.stringValue?.contains("-32023") == true)
+
+      let isolationStarted = ContinuousClock.now
+      let bPrompt = "complete-on-cancel"
+      let bRequestID = "cursor-vendor-isolation-b"
+      // Retain B's original MCP result after dispatch so its wait cannot hold a Gateway worker.
+      let startedB = try cursorValue(
+        try await h.call(
+          "cursor.acp.session.prompt", ["session": .string(b), "prompt": .string(bPrompt)],
+          startRequestID: bRequestID))
+      try #require(startedB["request_id"] == .string(bRequestID))
+      try #require(startedB["state"] == .string("running"))
+      let bDownstreamID = try #require(startedB["downstream_request_id"]?.stringValue)
+      try await h.waitVendorPrompt(pid: bPID, prompt: bPrompt)
+      let bStarted = try h.vendorTurn(pid: bPID, prompt: bPrompt)
+      let bNativeID = try #require(bStarted.first?["acp_id"]?.intValue)
+      h.reportIsolation(
+        "B retained MCP request \(bDownstreamID) reached peer as ACP request \(bNativeID)",
+        started: isolationStarted)
+      async let ignored = h.observedPrompt(
+        a, "ignore-cancel", pid: aPID, started: isolationStarted)
+      try await h.waitVendorPrompt(pid: aPID, prompt: "ignore-cancel")
+      h.reportIsolation("A prompt reached peer", started: isolationStarted)
+      let ignoredStop = try await h.stop(a)
+      h.reportIsolation("A stop returned", started: isolationStarted)
+      if let stopRequestID = ignoredStop.objectValue?["structuredContent"]?.objectValue?[
+        "gateway_execution"]?.objectValue?["request_id"]?.stringValue,
+        let audit = try? h.base.database.auditEvents(requestID: stopRequestID)
+      {
+        let admitted = audit.first { $0.errorCode == "permission.admitted" }?.occurredAt
+        h.reportIsolation(
+          "A stop audit request \(stopRequestID) admitted_ms "
+            + (admitted.map { String(Int64($0.timeIntervalSince1970 * 1_000)) } ?? "none"),
+          started: isolationStarted)
+      }
+      if ignoredStop.objectValue?["isError"] == .bool(true) {
+        h.reportStop(pid: aPID, prompt: "ignore-cancel", stop: ignoredStop, reply: .null)
+      }
+      try #require(try cursorValue(ignoredStop)["cancel_requested"] == .bool(true))
+      let ignoredReply = try await ignored
+      h.reportStop(pid: aPID, prompt: "ignore-cancel", stop: ignoredStop, reply: ignoredReply)
+      let unsettled = try cursorNativeValue(ignoredReply)["error"]?.objectValue
+      try #require(unsettled?["code"] == .string("cancellation_unsettled"))
+      try #require(unsettled?["message"]?.stringValue?.contains("did not settle") == true)
+      let aMembers = try await aOwner.members()
+      let bMembers = try await bOwner.members()
+      let siblingAlive = bMembers.contains { $0.processID == bPID }
+      h.reportIsolation(
+        "A settled; A members \(aMembers.map(\.processID)), B members \(bMembers.map(\.processID))",
+        started: isolationStarted)
+      if !siblingAlive {
+        let adapterOwner = h.base.observations.ownerships.first {
+          (try? $0.recoveryState().root.processID) == adapter.member.processID
+        }
+        let adapterMembers = try? await adapterOwner?.members()
+        h.reportIsolation(
+          "adapter members \(adapterMembers?.map(\.processID) ?? [])",
+          started: isolationStarted)
+        h.reportAcquisitionLifetimes(measured, started: isolationStarted)
+      }
+      try #require(aMembers.isEmpty)
+      try #require(siblingAlive)
+      let bPending = try h.vendorTurn(pid: bPID, prompt: bPrompt)
+      try #require(bPending.map { $0["phase"]?.stringValue } == ["prompt"])
+      try #require(bPending.first?["acp_id"]?.intValue == bNativeID)
+      let pendingReceipt = try await h.requestReceipt(bRequestID)
+      try #require(pendingReceipt["state"] == .string("running"))
+      try #require(pendingReceipt["downstream_request_id"] == .string(bDownstreamID))
+
+      let completionStop = try await h.stop(b)
+      try #require(try cursorValue(completionStop)["cancel_requested"] == .bool(true))
+      let completedReceipt = try await h.waitRequestReceipt(bRequestID)
+      try #require(completedReceipt["state"] == .string("succeeded"), "\(completedReceipt)")
+      try #require(completedReceipt["request_id"] == .string(bRequestID))
+      try #require(completedReceipt["downstream_request_id"] == .string(bDownstreamID))
+      let completionReply = try #require(completedReceipt["result"])
+      h.reportStop(pid: bPID, prompt: bPrompt, stop: completionStop, reply: completionReply)
+      let won = try cursorValue(completionReply)
+      try #require(won["session"] == .string(b))
+      try #require(won["stop_reason"] == .string("end_turn"))
+      try #require(
+        won["native_result"]?.objectValue?["usage"]?.objectValue?["tokens"] == .integer(7))
+      let bSettled = try h.vendorTurn(pid: bPID, prompt: bPrompt)
+      try #require(bSettled.map { $0["phase"]?.stringValue } == ["prompt", "cancel", "terminal"])
+      try #require(bSettled.last?["acp_id"]?.intValue == bNativeID)
+      try #require(bSettled.last?["outcome"]?.objectValue?["result"] == won["native_result"])
+      let freshB = "fresh B prompt after A retirement"
+      let freshReply = try cursorValue(try await h.prompt(b, freshB))
+      try #require(freshReply["session"] == .string(b))
+      try #require(freshReply["stop_reason"] == .string("end_turn"))
+      try await h.waitVendorPrompt(pid: bPID, prompt: freshB)
+      let freshTurn = try h.vendorTurn(pid: bPID, prompt: freshB)
+      let freshNativeID = try #require(freshTurn.first?["acp_id"]?.intValue)
+      try #require(freshNativeID > bNativeID)
+      let effects = try h.vendorEffects()
+      try #require(effects.filter { $0["phase"]?.stringValue == "probe" }.count == 2)
+      try #require(
+        effects.filter {
+          $0["pid"]?.intValue == Int(aPID) && $0["phase"]?.stringValue == "cancel"
+        }.count == 3)
+      try #require(
+        effects.filter {
+          $0["pid"]?.intValue == Int(bPID) && $0["phase"]?.stringValue == "cancel"
+        }.count == 1)
+      try #require(try h.nativeStarts == 2)
+      try #require(providerLaunches().count == launches.count)
+      _ = try cursorValue(
+        try await h.call("cursor.acp.session.close", ["session": .string(b)]))
+      try #require(try await bOwner.members().isEmpty)
+    }
+    let evidence = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_CASES"]))
+    var cases = [
+      "dual-authority", "cold-warm-ownership", "seatbelt-boundaries", "ordinary-cancel",
+      "native-result-races", "pending-answer-cancel", "forced-stop-isolation", "cleanup",
+    ]
+    var details: [String: Any] = ["acquisitions": measured]
+    #if DEBUG
+      details["startup_cancellation"] = try await registeredStartupCancellation(package)
+      details["lost_start_reply"] = try await registeredLostStartReply(package)
+      details["pending_start_closure"] = try await registeredPendingStartClosure(package)
+      cases += ["startup-cancellation", "lost-start-reply", "pending-start-closure"]
+    #endif
+    details["kind"] = "deterministic"
+    details["tests_executed"] = 1
+    let runID = try #require(env["COMPUTER_MCP_CURSOR_RUN_ID"])
+    details["run_id"] = runID
+    details["cases"] = cases
+    try JSONSerialization.data(withJSONObject: details).write(to: evidence, options: .atomic)
+  }
+
+  #if DEBUG
+    private func registeredStartupCancellation(_ package: PluginPackage) async throws
+      -> [String: Any]
+    {
+      var evidence: [String: Any] = [:]
+      try await withCursor(package) { h in
+        try await h.discover()
+        // Discovery and delegated execution use separate pool authority.
+        let executionBaseline = h.vendorLaunches.count
+        let b = try await h.open()
+        let launches = Array(h.vendorLaunches.dropFirst(executionBaseline))
+        try #require(launches.count == 3)
+        try #require(launches.dropFirst().map(\.arguments) == [["--version"], ["acp"]])
+        let bPID = try #require(launches.last?.member.processID)
+        let adapter = try #require(launches.first)
+        try #require(adapter.arguments.last == "--host-vendor-execution")
+        let adapterPID = adapter.member.processID
+        let bOwner = try #require(
+          h.base.observations.ownerships.first {
+            (try? $0.recoveryState().root.processID) == bPID
+          })
+        let bPrompt = "complete-on-cancel"
+        let bRequest = "startup-sibling"
+        let bStarted = try cursorValue(
+          try await h.call(
+            "cursor.acp.session.prompt", ["session": .string(b), "prompt": .string(bPrompt)],
+            startRequestID: bRequest))
+        try #require(bStarted["state"] == .string("running"))
+        let bDownstream = try #require(bStarted["downstream_request_id"])
+        try await h.waitVendorPrompt(pid: bPID, prompt: bPrompt)
+        let bPending = try h.vendorTurn(pid: bPID, prompt: bPrompt)
+        try #require(bPending.map { $0["phase"]?.stringValue } == ["prompt"])
+        let bNative = try #require(bPending.first?["acp_id"])
+
+        for withdraw in [false, true] {
+          let requestID = withdraw ? "startup-withdraw" : "startup-control"
+          let gate = CursorStartupBarrier<CursorStartupBoundary>()
+          let launchCount = h.vendorLaunches.count
+          let startCount = try h.nativeStarts
+          try await h.withStartupBarrier(gate) {
+            let started = try cursorValue(
+              try await h.call(
+                "cursor.acp.session.open", ["permission_policy": .string("manual")],
+                startRequestID: requestID))
+            try #require(started["request_id"] == .string(requestID))
+            try #require(started["state"] == .string("running"))
+            let downstream = try #require(started["downstream_request_id"]?.stringValue)
+            let boundary = try await gate.wait()
+            let initialReceipts = boundary.receipts()
+            try #require(initialReceipts.probe == "retired")
+            try #require(initialReceipts.workload == "pending")
+            let before = try h.startupChildren(boundary)
+            let probePID = try #require(before.probe.recovery?.root.processID)
+            try #require(before.probe.completed)
+            try #require(before.workload.recovery == nil && !before.workload.completed)
+            let atBoundary = Array(h.vendorLaunches.dropFirst(launchCount))
+            try #require(atBoundary.map(\.arguments) == [["--version"]])
+            try #require(atBoundary.first?.member.processID == probePID)
+            try #require(atBoundary.first?.sandboxed == true)
+            var trial: [String: Any] = [
+              "acquisition": boundary.acquisitionID.uuidString,
+              "execution": boundary.executionID.uuidString,
+              "probe": boundary.probeID.uuidString,
+              "workload": boundary.workloadID.uuidString,
+              "probe_pid": Int(probePID),
+              "probe_state": initialReceipts.probe,
+              "request_id": requestID,
+              "downstream_request_id": downstream,
+            ]
+
+            if withdraw {
+              let cancellation = try cursorValue(
+                try await h.gateway.callToolForMCPAsync(
+                  name: "mcp.requests.cancel",
+                  arguments: .object([
+                    "server": .string("cursor-fixture"), "request_id": .string(requestID),
+                  ]), context: .empty))
+              try #require(cancellation["cancellation_requested"] == .bool(true))
+              try #require(cancellation["request_id"] == .string(requestID))
+              let sealed = try h.startupChildren(boundary)
+              let receipts = boundary.receipts()
+              try #require(receipts.probe == "retired")
+              try #require(receipts.workload == "never_dispatched")
+              try #require(sealed.probe.completed)
+              try #require(sealed.probe.recovery?.root.processID == probePID)
+              try #require(sealed.workload.completed && sealed.workload.recovery == nil)
+              try #require(h.vendorLaunches.count == launchCount + 1)
+              trial["workload_state"] = receipts.workload
+              print("Cursor startup sealed \(boundary.acquisitionID) before workload bootstrap")
+            }
+
+            gate.release()
+            let receipt = try await h.waitRequestReceipt(requestID)
+            try #require(receipt["request_id"] == .string(requestID))
+            try #require(receipt["downstream_request_id"] == .string(downstream))
+            let reply = try #require(receipt["result"])
+            if withdraw {
+              try #require(receipt["state"] == .string("failed"), "\(receipt)")
+              try #require(receipt["cancellation"] == .string("sent"))
+              try #require(reply.objectValue?["isError"] == .bool(true))
+              let payload = reply.objectValue?["structuredContent"]?.objectValue?["result"]
+              try #require(
+                payload?.objectValue?["error"]?.objectValue?["code"] == .string("cancelled"))
+              try #require(h.vendorLaunches.count == launchCount + 1)
+              try #require(try h.nativeStarts == startCount)
+              trial["workload_starts"] = 0
+              trial["result"] = "cancelled"
+            } else {
+              try #require(receipt["state"] == .string("succeeded"), "\(receipt)")
+              let opened = try cursorValue(reply)
+              let session = try #require(opened["session"]?.stringValue)
+              let live = try h.startupChildren(boundary)
+              let workloadPID = try #require(live.workload.recovery?.root.processID)
+              try #require(!live.workload.completed)
+              let launches = Array(h.vendorLaunches.dropFirst(launchCount))
+              try #require(launches.map(\.arguments) == [["--version"], ["acp"]])
+              try #require(launches.last?.member.processID == workloadPID)
+              try #require(launches.last?.sandboxed == true)
+              try #require(try h.nativeStarts == startCount + 1)
+              let owner = try #require(
+                h.base.observations.ownerships.first {
+                  (try? $0.recoveryState().root.processID) == workloadPID
+                })
+              _ = try cursorValue(
+                try await h.call("cursor.acp.session.close", ["session": .string(session)]))
+              try #require(try await owner.members().isEmpty)
+              trial["workload_pid"] = Int(workloadPID)
+              trial["workload_starts"] = 1
+              trial["result"] = "opened"
+              print("Cursor startup control \(boundary.acquisitionID) launched \(workloadPID)")
+            }
+            evidence[withdraw ? "cancelled" : "control"] = trial
+          }
+        }
+
+        try #require(try await bOwner.members().contains(where: { $0.processID == bPID }))
+        let stillPending = try h.vendorTurn(pid: bPID, prompt: bPrompt)
+        try #require(stillPending.map { $0["phase"]?.stringValue } == ["prompt"])
+        try #require(stillPending.first?["acp_id"] == bNative)
+        let stop = try cursorValue(try await h.stop(b))
+        try #require(stop["cancel_requested"] == .bool(true))
+        let completed = try await h.waitRequestReceipt(bRequest)
+        try #require(completed["state"] == .string("succeeded"), "\(completed)")
+        try #require(completed["downstream_request_id"] == bDownstream)
+        let result = try cursorValue(try #require(completed["result"]))
+        try #require(
+          result["session"] == .string(b) && result["stop_reason"] == .string("end_turn"))
+        let settled = try h.vendorTurn(pid: bPID, prompt: bPrompt)
+        try #require(settled.map { $0["phase"]?.stringValue } == ["prompt", "cancel", "terminal"])
+        try #require(settled.last?["acp_id"] == bNative)
+        try #require(settled.last?["outcome"]?.objectValue?["result"] == result["native_result"])
+        let fresh = "fresh B after startup cancellation"
+        let reply = try cursorValue(try await h.prompt(b, fresh))
+        try #require(reply["session"] == .string(b) && reply["stop_reason"] == .string("end_turn"))
+        try await h.waitVendorPrompt(pid: bPID, prompt: fresh)
+        let freshTurn = try h.vendorTurn(pid: bPID, prompt: fresh)
+        let freshID = try #require(freshTurn.first?["acp_id"]?.intValue)
+        let originalID = try #require(bNative.intValue)
+        try #require(freshID > originalID)
+        _ = try cursorValue(try await h.call("cursor.acp.session.close", ["session": .string(b)]))
+        try #require(try await bOwner.members().isEmpty)
+        let adapters = h.vendorLaunches.dropFirst(executionBaseline).filter {
+          $0.arguments.last == "--host-vendor-execution"
+        }
+        try #require(adapters.map(\.member.processID) == [adapterPID])
+        evidence["sibling_pid"] = Int(bPID)
+        evidence["adapter_pid"] = Int(adapterPID)
+      }
+      return evidence
+    }
+
+    private func registeredLostStartReply(_ package: PluginPackage) async throws -> [String: Any] {
+      var evidence: [String: Any] = [:]
+      try await withCursor(package) { h in
+        try await h.discover()
+        let b = try await h.open()
+        let bPID = try #require(h.vendorLaunches.last?.member.processID)
+        let before = h.vendorLaunches.count
+        let launch = CursorStartupBarrier<CursorStartupReply>()
+        let lookup = CursorStartupBarrier<CursorStartupReply>()
+        let retire = CursorStartupBarrier<CursorStartupReply>()
+        try await h.withVendorReplyObserver(
+          { reply in
+            switch reply.operation {
+            case .launch:
+              await launch.park(reply)
+              return true
+            case .receipt:
+              await lookup.park(reply)
+              return false
+            case .retire:
+              await retire.park(reply)
+              return false
+            }
+          },
+          release: {
+            launch.release()
+            lookup.release()
+            retire.release()
+          }
+        ) {
+          let requestID = "startup-lost-reply"
+          let arguments: [String: JSONValue] = ["permission_policy": .string("manual")]
+          let started = try cursorValue(
+            try await h.call("cursor.acp.session.open", arguments, startRequestID: requestID))
+          try #require(started["state"] == .string("running"))
+          try #require(started["request_id"] == .string(requestID))
+          let downstream = try #require(started["downstream_request_id"]?.stringValue)
+          let withheld = try await launch.wait()
+          let boundary = withheld.boundary
+          let probeID = JSONValue.string(boundary.probeID.uuidString.lowercased())
+          let workloadID = JSONValue.string(boundary.workloadID.uuidString.lowercased())
+          let pid = try await h.waitForNewWorkload(since: before)
+          let live = try h.startupChildren(boundary)
+          let member = try #require(live.workload.recovery?.root)
+          try #require(member.processID == pid)
+          try #require(withheld.requestedWorkloadID == boundary.workloadID)
+          let durable = try h.workloadJournal(boundary)
+          try #require(durable.recovery.root == member && !durable.completed)
+          try #require(withheld.charged)
+          print("Cursor startup reply dropped for \(boundary.workloadID) after peer \(pid) started")
+          launch.release()
+
+          let recovered = try await lookup.wait(timeout: .seconds(15))
+          try #require(recovered.boundary.acquisitionID == boundary.acquisitionID)
+          try #require(recovered.boundary.executionID == boundary.executionID)
+          try #require(recovered.requestedWorkloadID == boundary.workloadID)
+          try #require(recovered.payload["probe"] == probeID)
+          try #require(recovered.payload["workload"] == workloadID)
+          try #require(recovered.payload["probe_state"] == .string("retired"))
+          try #require(recovered.payload["workload_state"] == .string("pending"))
+          try #require(recovered.payload["retired"] == .bool(false))
+          try #require(recovered.charged)
+          print("Cursor startup lookup recovered \(boundary.workloadID) while still charged")
+          let pending = try h.workloadJournal(boundary)
+          try #require(pending.recovery.root == member && !pending.completed)
+          let during = "B while A start receipt is pending"
+          let bReply = try cursorValue(try await h.prompt(b, during))
+          try #require(
+            bReply["session"] == .string(b) && bReply["stop_reason"] == .string("end_turn"))
+          try await h.waitVendorPrompt(pid: bPID, prompt: during)
+          lookup.release()
+
+          let settled = try await retire.wait()
+          try #require(settled.boundary.acquisitionID == boundary.acquisitionID)
+          try #require(settled.requestedWorkloadID == boundary.workloadID)
+          try #require(settled.payload["probe"] == probeID)
+          try #require(settled.payload["workload"] == workloadID)
+          try #require(settled.payload["workload_state"] == .string("retired"))
+          try #require(settled.payload["retired"] == .bool(true) && !settled.charged)
+          let complete = try h.workloadJournal(boundary)
+          try #require(complete.completed && complete.recovery.root == member)
+          let owner = try #require(
+            h.base.observations.ownerships.first {
+              (try? $0.recoveryState().root) == member
+            })
+          try #require(try await owner.members().isEmpty)
+          print("Cursor startup retired \(boundary.workloadID) and released its capacity")
+          retire.release()
+
+          let terminal = try await h.waitRequestReceipt(requestID)
+          try #require(terminal["state"] == .string("failed"), "\(terminal)")
+          try #require(terminal["downstream_request_id"] == .string(downstream))
+          let reply = try #require(terminal["result"])
+          try #require(reply.objectValue?["isError"] == .bool(true))
+          let payload = reply.objectValue?["structuredContent"]?.objectValue?["result"]
+          try #require(payload?.objectValue?["error"]?.objectValue?["code"] == .string("timeout"))
+          let repeated = try cursorValue(
+            try await h.call("cursor.acp.session.open", arguments, startRequestID: requestID))
+          try #require(repeated["state"] == .string("failed"))
+          try #require(repeated["downstream_request_id"] == .string(downstream))
+          try #require(repeated["result"] == reply)
+          try #require(repeated["replayed"] == .bool(false))
+
+          let fresh = "B after lost start reply settlement"
+          let bFresh = try cursorValue(try await h.prompt(b, fresh))
+          try #require(
+            bFresh["session"] == .string(b) && bFresh["stop_reason"] == .string("end_turn"))
+          try await h.waitVendorPrompt(pid: bPID, prompt: fresh)
+          let measured = Array(h.vendorLaunches.dropFirst(before))
+          try #require(measured.map(\.arguments) == [["--version"], ["acp"]])
+          let peers = try h.vendorEffects().filter { $0["phase"] == .string("workload") }
+          try #require(peers.compactMap { $0["pid"]?.intValue } == [Int(bPID), Int(pid)])
+          try #require(try h.nativeStarts == 1)
+          evidence = [
+            "request_id": requestID, "downstream_request_id": downstream,
+            "acquisition": boundary.acquisitionID.uuidString,
+            "execution": boundary.executionID.uuidString, "probe": boundary.probeID.uuidString,
+            "workload": boundary.workloadID.uuidString, "workload_pid": Int(pid),
+            "sibling_pid": Int(bPID), "charged_at_lookup": recovered.charged,
+            "charged_after_retirement": settled.charged, "workload_starts": peers.count - 1,
+            "workload_state": "retired", "result": "timeout",
+          ]
+        }
+        _ = try cursorValue(try await h.call("cursor.acp.session.close", ["session": .string(b)]))
+      }
+      return evidence
+    }
+
+    private func registeredPendingStartClosure(_ package: PluginPackage) async throws -> [String:
+      Any]
+    {
+      var evidence: [String: Any] = [:]
+      try await withCursor(package) { h in
+        try await h.discover()
+        _ = try await h.open()
+        let bPID = try #require(h.vendorLaunches.last?.member.processID)
+        let bOwner = try #require(
+          h.base.observations.ownerships.first {
+            (try? $0.recoveryState().root.processID) == bPID
+          })
+        let before = h.vendorLaunches.count
+        let gate = CursorStartupBarrier<CursorStartupBoundary>()
+        try await h.withStartupBarrier(gate) {
+          let requestID = "startup-connection-closure"
+          let started = try cursorValue(
+            try await h.call(
+              "cursor.acp.session.open", ["permission_policy": .string("manual")],
+              startRequestID: requestID))
+          try #require(started["state"] == .string("running"))
+          let downstream = try #require(started["downstream_request_id"]?.stringValue)
+          let boundary = try await gate.wait()
+          let beforeClosure = try h.startupChildren(boundary)
+          let probeRoot = try #require(beforeClosure.probe.recovery?.root)
+          try #require(beforeClosure.probe.completed && !beforeClosure.workload.completed)
+          try #require(beforeClosure.workload.recovery == nil)
+          let owner = try await h.vendorRequestOwner(requestID)
+          async let close = h.closeVendorConnection(owner)
+          do {
+            try await h.waitForStartupDrain(boundary)
+          } catch {
+            gate.release()
+            _ = try? await close
+            throw error
+          }
+          gate.release()
+
+          let result = try await close
+          try #require(result["transport_closed"] == .bool(true))
+          try #require(result["connection_id"] == .string(owner.connectionID.uuidString))
+          try #require(result["managed_process_exit_confirmed"] == .bool(true))
+          try #require(result["work_cleanup"] == .string("confirmed"), "\(result)")
+          try #require(result["remaining_owners"] == .integer(0), "\(result)")
+          print("Cursor private channel close joined pending startup \(boundary.acquisitionID)")
+          let after = try h.startupChildren(boundary)
+          try #require(after.probe.completed && after.workload.completed)
+          try #require(after.probe.recovery?.root == probeRoot)
+          try #require(after.workload.recovery == nil)
+          try #require(try await bOwner.members().isEmpty)
+          let measured = Array(h.vendorLaunches.dropFirst(before))
+          try #require(measured.map(\.arguments) == [["--version"]])
+          let terminal = try await h.waitRequestReceipt(requestID)
+          try #require(terminal["state"] == .string("outcome_unknown"))
+          try #require(terminal["cleanup"] == .string("confirmed"))
+          try #require(terminal["downstream_request_id"] == .string(downstream))
+          try #require(try h.nativeStarts == 1)
+          evidence = [
+            "request_id": requestID, "downstream_request_id": downstream,
+            "acquisition": boundary.acquisitionID.uuidString,
+            "execution": boundary.executionID.uuidString, "probe": boundary.probeID.uuidString,
+            "workload": boundary.workloadID.uuidString, "workload_starts": measured.count - 1,
+            "probe_state": boundary.receipts().probe,
+            "workload_state": boundary.receipts().workload,
+            "result": "outcome_unknown", "cleanup": "confirmed",
+          ]
+        }
+      }
+      return evidence
+    }
+  #endif
+
+  @Test func sourceConsumer() async throws {
+    let env = ProcessInfo.processInfo.environment
+    let source = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_PLUGIN"]))
+    let package = try PluginPackage.load(at: source)
+    try #require(package.manifest.id == "cursor")
+    try #require(package.manifest.permissions?.map(\.id) == [.project])
+    try #require(package.manifest.permissions?.first?.access == .write)
+    try #require(package.manifest.sandbox == nil)
+    let requirements = try PluginContributionRequirements(
+      sourceDigest: PluginStore.manifestDigest(package.manifest),
+      declarations: .init(package.manifest), componentID: "acp")
+    let contribution = try #require(requirements.contribution)
+    try #require(Set(contribution.toolRequirements.keys) == cursorReadTools)
+    for name in cursorReadTools {
+      try #require(requirements.requirements(for: name)?.project == .read)
+      try #require(
+        requirements.applying(to: .init(access: .projectWrite), tool: name).access == .projectWrite)
+    }
+    for name in cursorWriteTools {
+      try #require(requirements.requirements(for: name)?.project == .write)
+    }
+    for (caller, provider, use) in [
+      (0, true, true), (1, true, true), (2, false, true), (2, true, false),
+    ] {
+      try await withCursor(package, caller: caller, provider: provider, use: use) { h in
+        if use { try await h.discover() }
+        let requestsBefore = Set(
+          try h.gateway.permissionRuntime.service.view(owner: h.owner).requests.map(\.request.id))
+        let before = try h.nativeStarts
+        let denied: JSONValue
+        if use {
+          denied = try await h.call("cursor.acp.session.open")
+        } else {
+          denied = try await h.catalog()
+        }
+        try cursorDenied(denied)
+        try #require(
+          denied.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]
+            == .string("permission.required"))
+        let requests = try h.gateway.permissionRuntime.service.view(owner: h.owner).requests.map(
+          \.request
+        ).filter {
+          !requestsBefore.contains($0.id)
+        }
+        try #require(!requests.isEmpty)
+        for request in requests {
+          guard case .permission(let content) = request.content else {
+            Issue.record("Expected a permission request, not another admission failure")
+            continue
+          }
+          if use {
+            guard case .project(let project) = content.requirement.permission else {
+              Issue.record("Expected Project write authority")
+              continue
+            }
+            try #require(project == h.projectID || project == "fixture")
+            try #require(content.requirement.value == .write)
+          } else {
+            try #require(content.requirement.permission == .plugin("cursor"))
+            try #require(content.requirement.value == .use)
+          }
+          if provider {
+            try #require(content.principal != .plugin(.package("cursor")))
+          } else {
+            try #require(content.principal == .plugin(.package("cursor")))
+          }
+        }
+        try #require(try h.nativeStarts == before)
+        let cli = try #require(
+          try h.gateway.listTools(context: .empty).first {
+            $0.meta?.objectValue?["cli"]?.objectValue?["command"] == .string("print")
+          })
+        do {
+          let result = try await h.gateway.callToolForMCPAsync(
+            name: cli.name, arguments: .object(["prompt": .string("denied")]), context: .empty)
+          try cursorDenied(result)
+        } catch is GatewayPermissionCallError {}
+        try #require(!FileManager.default.fileExists(atPath: h.worktree.path + "/cursor-cli-write"))
+        if caller == 1 && provider && use {
+          _ = try cursorValue(try await h.call("cursor.acp.session.list"))
+        }
+      }
+    }
+    try await withCursor(package) { h in
+      try await h.discover()
+      let cli = try #require(
+        try h.gateway.listTools(context: .empty).first {
+          $0.meta?.objectValue?["cli"]?.objectValue?["command"] == .string("print")
+        })
+      let prompt = "--leading 'quotes' 中文\nfixture"
+      let cliResult = try cursorValue(try await h.callCLI(cli.name, prompt: prompt))
+      try #require(cliResult["exit_code"] == .integer(0))
+      let cliData = try #require(cliResult["data"]?.objectValue)
+      try #require(cliData["argv"]?.arrayValue?.suffix(2) == [.string("--"), .string(prompt)])
+      try cursorWorkingDirectory(try #require(cliData["cwd"]?.stringValue), matches: h.worktree)
+      try #require(
+        try String(
+          contentsOf: h.worktree.appendingPathComponent("cursor-cli-write"), encoding: .utf8)
+          == "written")
+      let skill = try cursorValue(
+        try await h.gateway.callToolForMCPAsync(
+          name: "skills.read", arguments: .object(["name": .string("cursor-agent")]),
+          context: .empty))
+      try #require(skill["name"] == .string("cursor-agent"))
+      let session = try await h.open()
+      let nativeStarts = try h.nativeStarts
+      try #require(nativeStarts == 1)
+      try #require(session != "fixture-session")
+      let args: [String: JSONValue] = ["session": .string(session)]
+      let paths = String(
+        decoding: try JSONSerialization.data(withJSONObject: h.outside.map(\.path)), as: UTF8.self)
+      for _ in 0..<2 {
+        _ = try cursorValue(
+          try await h.call(
+            "cursor.acp.session.prompt",
+            args.merging([
+              "prompt": .string("boundaries:" + paths)
+            ]) { _, b in b }))
+      }
+      try #require(
+        try String(
+          contentsOf: h.worktree.appendingPathComponent("cursor-selected-write"), encoding: .utf8)
+          == "written")
+      for path in h.outside {
+        try #require(try String(contentsOf: path, encoding: .utf8) == "sentinel")
+      }
+      let events = try cursorValue(try await h.call("cursor.acp.events.read", args))
+      let rows = try #require(events["events"]?.arrayValue)
+      let records = rows.compactMap { row -> String? in
+        row.objectValue?["event"]?.objectValue?["params"]?.objectValue?["update"]?.objectValue?[
+          "content"]?.objectValue?["text"]?.stringValue
+      }.filter { $0.hasPrefix("{\"cwd\"") }
+      try #require(records.count == 2)
+      for text in records {
+        let record = try #require(
+          try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        try cursorWorkingDirectory(try #require(record["cwd"] as? String), matches: h.worktree)
+        try #require(
+          record["denied"] as? [[String]] == Array(repeating: ["r", "a"], count: h.outside.count))
+      }
+      let container = try h.base.database.prepareProviderContainer(.package("cursor")).sandbox
+      let firstRecord = try #require(
+        try JSONSerialization.jsonObject(with: Data(records[0].utf8)) as? [String: Any])
+      let locations = try #require(firstRecord["paths"] as? [String: String])
+      try #require(
+        locations == [
+          "HOME": container.home.value, "XDG_CACHE_HOME": container.cache.value,
+          "XDG_CONFIG_HOME": container.home.value + "/.config",
+          "XDG_STATE_HOME": container.state.value,
+        ])
+      for path in [container.home, container.cache, container.state] {
+        try #require(
+          try String(contentsOfFile: path.value + "/cursor-container-marker", encoding: .utf8)
+            == "xx")
+      }
+      // Exercise the actual offered native choice, then a retained cancelled turn.
+      let run = try cursorValue(
+        try await h.call(
+          "cursor.acp.session.prompt.start",
+          args.merging([
+            "prompt": .string("permission")
+          ]) { _, b in b }))
+      let pending = try await h.waitPending(session)
+      let request = try #require(pending["request_id"]?.stringValue)
+      _ = try cursorValue(
+        try await h.call(
+          "cursor.acp.requests.respond",
+          [
+            "session": .string(session), "request_id": .string(request),
+            "response": .object([
+              "outcome": .object(["outcome": .string("selected"), "optionId": .string("opaque-no")])
+            ]),
+          ]))
+      let completed = try await h.waitResult(
+        session, prompt: try #require(run["prompt_id"]?.stringValue))
+      try #require(completed["is_error"] == .bool(false))
+      try #require(completed["text"]?.stringValue?.contains("opaque-no") == true)
+      let slow = try cursorValue(
+        try await h.call(
+          "cursor.acp.session.prompt.start", args.merging(["prompt": .string("slow")]) { _, b in b }
+        ))
+      try await h.waitStarted(session)
+      _ = try cursorValue(try await h.call("cursor.acp.session.cancel", args))
+      let cancelled = try await h.waitResult(
+        session, prompt: try #require(slow["prompt_id"]?.stringValue))
+      try #require(cancelled["is_error"] == .bool(true))
+      try #require(try h.nativeStarts == nativeStarts)
+      // Client B uses a separate authority and kill domain in the same provider container.
+      let firstOwnerships = h.base.observations.ownerships
+      var retained = false
+      for ownership in firstOwnerships {
+        if try await ownership.members().isEmpty == false { retained = true }
+      }
+      try #require(retained)
+      let second = try h.makeConsumer("cursor-second", caller: 2, use: true)
+      h.other = second
+      try await h.discover(gateway: second)
+      let secondSession = try #require(
+        try cursorValue(try await h.call("cursor.acp.session.open", gateway: second))["session"]?
+          .stringValue)
+      let service = h.gateway.permissionRuntime.service
+      _ = try service.revokePermission(
+        .plugin("cursor"), profileID: h.consumerID, owner: h.owner,
+        expectedRevision: service.view(owner: h.owner).revision)
+      try await h.gateway.permissionRuntime.coordinator.reconcile()
+      try cursorDenied(
+        try await h.call(
+          "cursor.acp.session.prompt",
+          ["session": .string(session), "prompt": .string("must not run")]))
+      _ = try cursorValue(
+        try await h.call(
+          "cursor.acp.session.prompt",
+          ["session": .string(secondSession), "prompt": .string("hello")], gateway: second))
+      for _ in 0..<200 {
+        var live = false
+        for ownership in firstOwnerships {
+          if try await ownership.members().isEmpty == false { live = true }
+        }
+        if !live { break }
+        try await Task.sleep(for: .milliseconds(10))
+      }
+      for ownership in firstOwnerships { try #require(try await ownership.members().isEmpty) }
+      // Removal is performed by the host while B still owns a live native session.
+      try await h.removeWorktree()
+      try cursorDenied(
+        try await h.call(
+          "cursor.acp.session.prompt",
+          ["session": .string(secondSession), "prompt": .string("must not run")], gateway: second))
+      try await h.requireJoined()
+    }
+    let evidence = URL(fileURLWithPath: try #require(env["COMPUTER_MCP_CURSOR_CASES"]))
+    try JSONSerialization.data(withJSONObject: [
+      "kind": "deterministic", "tests_executed": 1,
+      "run_id": try #require(env["COMPUTER_MCP_CURSOR_RUN_ID"]),
+      "cases": [
+        "package", "declarations", "dual-authority", "cli", "mcp", "skills", "worktree",
+        "container", "boundaries", "continuation", "cancellation", "scoped-revocation",
+        "host-removal", "cleanup",
+      ],
+    ]).write(to: evidence, options: .atomic)
+  }
+}
+
+private func cursorWorkingDirectory(_ reported: String, matches selected: URL) throws {
+  let actual = URL(fileURLWithPath: reported, isDirectory: true)
+  for location in [actual, selected] {
+    var isDirectory: ObjCBool = false
+    try #require(FileManager.default.fileExists(atPath: location.path, isDirectory: &isDirectory))
+    try #require(isDirectory.boolValue)
+  }
+  try #require(
+    actual.resolvingSymlinksInPath().standardizedFileURL
+      == selected.resolvingSymlinksInPath().standardizedFileURL)
+}
+
+private func cursorValue(_ value: JSONValue) throws -> [String: JSONValue] {
+  try #require(value.objectValue?["isError"] != .bool(true), "\(value)")
+  var result = try #require(
+    value.objectValue?["structuredContent"]?.objectValue?["result"]?.objectValue)
+  if let nested = result["structuredContent"]?.objectValue?["result"]?.objectValue {
+    try #require(result["isError"] != .bool(true), "\(value)")
+    result = nested
+  }
+  return result
+}
+private func cursorNativeValue(_ value: JSONValue) throws -> [String: JSONValue] {
+  let outer = try #require(
+    value.objectValue?["structuredContent"]?.objectValue?["result"]?.objectValue)
+  return try #require(outer["structuredContent"]?.objectValue?["result"]?.objectValue, "\(value)")
+}
+
+private func cursorDenied(_ value: JSONValue) throws {
+  try #require(value.objectValue?["isError"] == .bool(true), "\(value)")
+  let code = try #require(
+    value.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue?["code"]?
+      .stringValue)
+  try #require(
+    code != "permission.catalog_required", "Catalog discovery is a fixture precondition: \(value)")
+}
+private func withCursor(
+  _ package: PluginPackage, caller: Int = 2, provider: Bool = true,
+  use: Bool = true, body: (CursorHarness) async throws -> Void
+) async throws {
+  let h = try await CursorHarness.make(package, caller: caller, provider: provider, use: use)
+  do { try await body(h) } catch {
+    do { try await h.close() } catch { Issue.record("Cursor cleanup failed: \(error)") }
+    throw error
+  }
+  try await h.close()
+}
+
+#if DEBUG
+  private typealias CursorStartupBoundary = CursorVendorStartupObservation.Boundary
+  private typealias CursorStartupReply = CursorVendorStartupObservation.Reply
+
+  private final class CursorStartupBarrier<Value: Sendable>: Sendable {
+    private let arrival = AsyncStream<Value>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    private let permission = AsyncStream<Void>.makeStream()
+
+    func park(_ boundary: Value) async {
+      arrival.continuation.yield(boundary)
+      arrival.continuation.finish()
+      var permit = permission.stream.makeAsyncIterator()
+      _ = await permit.next()
+    }
+
+    func wait(timeout: Duration = .seconds(10)) async throws -> Value {
+      try await withThrowingTaskGroup(of: Value.self) { group in
+        group.addTask {
+          var events = self.arrival.stream.makeAsyncIterator()
+          guard let boundary = await events.next() else { throw CursorFixtureError.deadline }
+          return boundary
+        }
+        group.addTask {
+          try await Task.sleep(for: timeout)
+          throw CursorFixtureError.deadline
+        }
+        defer { group.cancelAll() }
+        guard let boundary = try await group.next() else { throw CursorFixtureError.deadline }
+        return boundary
+      }
+    }
+
+    func release() { permission.continuation.finish() }
+  }
+#endif
+
+private final class CursorHarness: @unchecked Sendable {
+  let base: FixedHostFixture
+  let lifecycle: GatewayStandaloneGenerations
+  let package: PluginPackage
+  let plugin: ResolvedPlugin
+  let projectID: String
+  let worktree: URL
+  let outside: [URL]
+  let owner: GatewayPermissionOwner
+  let consumerID = GatewayProfileID(rawValue: "cursor-consumer")!
+  var gateway: GatewayRuntime!
+  var other: GatewayRuntime?
+  var removed = false
+
+  init(
+    base: FixedHostFixture, lifecycle: GatewayStandaloneGenerations, package: PluginPackage,
+    plugin: ResolvedPlugin, projectID: String, worktree: URL, outside: [URL],
+    owner: GatewayPermissionOwner
+  ) {
+    self.base = base
+    self.lifecycle = lifecycle
+    self.package = package
+    self.plugin = plugin
+    self.projectID = projectID
+    self.worktree = worktree
+    self.outside = outside
+    self.owner = owner
+  }
+  static func make(_ package: PluginPackage, caller: Int, provider: Bool, use: Bool) async throws
+    -> CursorHarness
+  {
+    let base = try FixedHostFixture(fullAccess: false, lifecycle: true)
+    let lifecycle = GatewayStandaloneGenerations(base.runtime)
+    var pending: CursorHarness?
+    var created: String?
+    do {
+      try await base.initializeRepository()
+      let value = try cursorValue(
+        try await lifecycle.callToolForMCPAsync(
+          name: "git.worktree_add", arguments: .object(["name": .string("cursor")]),
+          context: .init(session: base.session)))
+      let project = try #require(value["project_id"]?.stringValue)
+      created = project
+      let path = URL(fileURLWithPath: try #require(value["path"]?.stringValue))
+      let foreign = try base.database.prepareProviderContainer(.package("foreign")).sandbox
+      let outside = [
+        base.project.appendingPathComponent("source-main"),
+        base.root.appendingPathComponent("unrelated"),
+        base.database.permissionExecutionRoot.appendingPathComponent("host-secret"),
+        URL(fileURLWithPath: foreign.state.value).appendingPathComponent("foreign-secret"),
+      ]
+      for file in outside { try Data("sentinel".utf8).write(to: file) }
+      let peer = base.root.appendingPathComponent("cursor-peer")
+      let python = URL(
+        fileURLWithPath: try #require(
+          ProcessInfo.processInfo.environment["COMPUTER_MCP_CURSOR_PYTHON"])
+      ).resolvingSymlinksInPath().path
+      let fixture = package.root.appendingPathComponent("tests/Fixtures/vendor.py")
+      let fixtureSource = try Data(contentsOf: fixture).map { String(format: "%02x", $0) }.joined()
+      try """
+      #!\(python)
+      import json, os, sys, traceback
+      os.environ['CURSOR_SOURCE_FIXTURE'] = '1'
+      def record_failure(detail):
+          # Failure-only diagnostics use the provider container, never the project.
+          try:
+              path = os.path.join(os.environ['HOME'], 'cursor-peer-failure.json')
+              with open(path, 'w') as stream:
+                  json.dump({'version_probe': sys.argv[1:] == ['--version'],
+                             'detail': detail[:8192]}, stream)
+          except Exception as error:
+              print('Cursor peer diagnostic unavailable: ' + str(error), file=sys.stderr)
+      try:
+          exec(compile(bytes.fromhex('\(fixtureSource)'), 'cursor-fixture/vendor.py', 'exec'))
+      except SystemExit as error:
+          if error.code not in (None, 0):
+              record_failure('SystemExit: ' + str(error.code))
+          raise
+      except BaseException:
+          record_failure(traceback.format_exc())
+          raise
+      """.write(to: peer, atomically: true, encoding: .utf8)
+      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: peer.path)
+      let beforeRegistration = base.observations.members.count
+      let store = PluginStore(database: base.database, platform: base.platform)
+      let env = ProcessInfo.processInfo.environment
+      let origin: PluginSource
+      let registered: PluginStoreSnapshot
+      if let archive = env["COMPUTER_MCP_CURSOR_ARCHIVE"] {
+        let installed = try await store.installArchive(
+          at: URL(fileURLWithPath: archive),
+          expectedSHA256: try #require(env["COMPUTER_MCP_CURSOR_ARCHIVE_SHA256"]),
+          pluginID: package.manifest.id, version: package.manifest.version,
+          hostVersion: PluginVersion(ComputerMCPCLI.version), architecture: PluginHost.architecture,
+          storageRoot: base.root.appendingPathComponent("plugins"),
+          workerExecutable: nativeGatewayTestExecutable(),
+          expectedRevision: store.snapshot().revision)
+        registered = installed.snapshot
+        try #require(installed.issues.isEmpty)
+        let selected = try #require(registered.selectedInstallations["cursor"])
+        origin = try #require(registered.installations.first { $0.id == selected }).source
+        try #require(
+          origin.kind == .artifact
+            && origin.artifactSHA256 == env["COMPUTER_MCP_CURSOR_ARCHIVE_SHA256"])
+        for path in [
+          PluginManifest.filename, "cursor-vendor-execution.json", "cli-tree.json",
+          "bin/cursor-mcp-adapter", "bin/cursor_vendor_execution.py", "bin/plugin_runtime.py",
+        ] {
+          try #require(
+            try Data(contentsOf: origin.root.appendingPathComponent(path))
+              == Data(contentsOf: package.root.appendingPathComponent(path)))
+        }
+      } else {
+        registered = try await store.registerDevelopment(
+          at: package.root, expectedRevision: store.snapshot().revision)
+        origin = .init(kind: .development, root: package.root)
+      }
+      // Archive verification may start the Host worker. Settings and approval start no provider.
+      let beforeSettings = base.observations.members.count
+      let runtimePackage = try PluginPackage.load(at: origin.root)
+      try #require(registered.settings["cursor"]?.enabled == false)
+      let settings = PluginSettings(
+        enabled: true,
+        mcp: [
+          "acp": .init(
+            registrationID: "cursor-fixture", exposure: .reexport, prefix: "", allowAnyTool: true,
+            toolRisks: Dictionary(
+              uniqueKeysWithValues: cursorReadTools.map { ($0, CapabilityRisk.readOnly) }))
+        ],
+        cli: ["agent": .init(registrationID: "cursor-cli")],
+        dependencyExecutables: ["cursor-agent": peer.path, "python-runtime": python])
+      _ = try await store.setSettings(
+        settings, for: "cursor", expectedRevision: store.snapshot().revision)
+      let plugin = try PluginResolver.resolve(
+        package: runtimePackage, source: origin,
+        settings: settings,
+        dependencyExecutables: [
+          "cursor-agent": peer, "python-runtime": URL(fileURLWithPath: python),
+        ],
+        hostVersion: PluginVersion(ComputerMCPCLI.version), architecture: PluginHost.architecture)
+      try #require(
+        plugin.diagnostics.isEmpty && plugin.cliCommands.count == 1 && plugin.mcpServers.count == 1
+          && plugin.skillRoots.count == 1)
+      let riskConfiguration = GatewayConfiguration(mcp: .init(servers: plugin.mcpServers))
+      for name in cursorReadTools {
+        try #require(
+          riskConfiguration.mcpRisk(for: .init(serverID: "cursor-fixture", toolName: name))
+            == .readOnly)
+      }
+      for name in cursorWriteTools.union(["cursor.acp.unknown"]) {
+        try #require(
+          riskConfiguration.mcpRisk(for: .init(serverID: "cursor-fixture", toolName: name))
+            == .externalWrite)
+      }
+      let adapter = try #require(plugin.mcpServers.first)
+      let adapterCommand = try #require(adapter.command)
+      try #require(
+        URL(fileURLWithPath: adapterCommand).resolvingSymlinksInPath()
+          == URL(fileURLWithPath: python).resolvingSymlinksInPath())
+      try #require(
+        adapter.args == [runtimePackage.root.appendingPathComponent("bin/cursor-mcp-adapter").path])
+      print(
+        "Cursor fixture adapter launch: \(adapterCommand) \(adapter.args); native peer interpreter: \(python)"
+      )
+      let owner = try GatewayPermissionOwner(
+        context: .init(
+          caller: .localApp, profileID: .localAdmin, trustedPrincipalID: "cursor-owner"),
+        validate: {})
+      let h = CursorHarness(
+        base: base, lifecycle: lifecycle, package: runtimePackage, plugin: plugin,
+        projectID: project,
+        worktree: path, outside: outside, owner: owner)
+      pending = h
+      let lifecycleProfile = try #require(
+        base.database.profiles().first { $0.id == base.configuration.runtime.profileID })
+      h.gateway = try h.makeConsumer("cursor-consumer", caller: caller, use: use)
+      try #require(
+        base.database.profiles().first { $0.id == lifecycleProfile.id } == lifecycleProfile)
+      try #require(base.observations.members.count == beforeSettings)
+      if origin.kind == .development {
+        try #require(beforeSettings == beforeRegistration)
+      }
+      try #require(try h.nativeStarts == 0)
+      try fixtureApprovePlugin(
+        runtimePackage, database: base.database, runtime: h.gateway.permissionRuntime,
+        permissions: fixturePermissions([.project("fixture"): .granted(provider ? .write : .read)]))
+      let approval = try #require(
+        h.gateway.permissionRuntime.service.view(owner: owner).providers.first {
+          $0.identity == .package("cursor")
+        })
+      try #require(approval.enabled && approval.fullAccessConsent == nil)
+      return h
+    } catch {
+      if let pending {
+        try await pending.close()
+      } else {
+        if let created {
+          _ = try await lifecycle.callToolForMCPAsync(
+            name: "git.worktree_remove",
+            arguments: .object(["project_id": .string(created), "force": .bool(true)]),
+            context: .init(session: base.session))
+        }
+        await lifecycle.shutdown()
+        base.session.end()
+        await base.runtime.shutdown()
+        try FileManager.default.removeItem(at: base.root)
+      }
+      throw error
+    }
+  }
+  var nativeStarts: Int {
+    get throws {
+      let home = try base.database.prepareProviderContainer(.package("cursor")).sandbox.home
+      let path = URL(fileURLWithPath: home.value).appendingPathComponent(
+        "cursor-native-starts.jsonl")
+      return (try? String(contentsOf: path, encoding: .utf8).split(separator: "\n").count) ?? 0
+    }
+  }
+  func makeConsumer(_ name: String, caller: Int, use: Bool) throws -> GatewayRuntime {
+    let id = try #require(GatewayProfileID(rawValue: name))
+    try #require(id != .localAdmin && id != base.configuration.runtime.profileID)
+    var permissions = fixturePermissions([
+      .skills: .granted(.access), .machineInformation: .granted(.access),
+    ])
+    if caller > 0 {
+      try permissions.set(.granted(caller == 2 ? .write : .read), for: .project("fixture"))
+    }
+    if use { try permissions.set(.granted(.use), for: .plugin("cursor")) }
+    let grant = ProfileGrant(id: id, permissions: permissions, allowedCallers: [.localMCP])
+    try base.database.saveProfile(grant)
+    let gateway = try GatewayRuntime(
+      configuration: .init(
+        runtime: .init(caller: .localMCP, profileID: id),
+        profiles: base.configuration.profiles + [.init(grant: grant)]),
+      context: .init(
+        caller: .localMCP, profileID: id, projectID: projectID, trustedPrincipalID: name),
+      database: base.database, registeredProjects: base.database.projects(),
+      platform: base.platform, plugins: [plugin], bundledPlugins: .init(packages: [], issues: []))
+    _ = try gateway.makeControlSession()
+    return gateway
+  }
+  func catalog(gateway selected: GatewayRuntime? = nil) async throws -> JSONValue {
+    try await (selected ?? gateway!).callToolForMCPAsync(
+      name: "mcp.tools.list", arguments: .object(["server": .string("cursor-fixture")]),
+      context: .empty)
+  }
+  func discover(gateway selected: GatewayRuntime? = nil) async throws {
+    let firstOwnership = base.observations.ownerships.count
+    let result = try await catalog(gateway: selected)
+    if result.objectValue?["isError"] == .bool(true) {
+      await reportLaunchFailure(since: firstOwnership, operation: "discovery")
+    }
+    try #require(result.objectValue?["isError"] != .bool(true), "\(result)")
+    let tools = try #require(
+      result.objectValue?["structuredContent"]?.objectValue?["result"]?.arrayValue)
+    let names = Set(tools.compactMap { $0.objectValue?["name"]?.stringValue })
+    try #require(names == cursorReadTools.union(cursorWriteTools))
+  }
+  func callCLI(_ name: String, prompt: String) async throws -> JSONValue {
+    let firstOwnership = base.observations.ownerships.count
+    let result = try await gateway.callToolForMCPAsync(
+      name: name, arguments: .object(["prompt": .string(prompt)]), context: .empty)
+    if result.objectValue?["isError"] == .bool(true) {
+      await reportLaunchFailure(since: firstOwnership, operation: "CLI compatibility/target")
+      let home = try base.database.prepareProviderContainer(.package("cursor")).sandbox.home
+      let diagnostic = URL(fileURLWithPath: home.value).appendingPathComponent(
+        "cursor-peer-failure.json")
+      if let stream = try? FileHandle(forReadingFrom: diagnostic) {
+        defer { try? stream.close() }
+        let data = try stream.read(upToCount: 16384) ?? Data()
+        print("Cursor peer failure diagnostic: \(String(decoding: data, as: UTF8.self))")
+      } else {
+        print(
+          "Cursor peer recorded no Python failure diagnostic; startup/termination/output matching remains unconfirmed"
+        )
+      }
+    }
+    return result
+  }
+  func reportLaunchFailure(since firstOwnership: Int, operation: String) async {
+    for ownership in base.observations.ownerships.dropFirst(firstOwnership) {
+      do {
+        let exit = try await ownership.wait(until: .now.advanced(by: .milliseconds(250)))
+        print(
+          "Cursor \(operation) process exit: status=\(exit.status), signal=\(String(describing: exit.signal))"
+        )
+      } catch {
+        print("Cursor \(operation) process exit unconfirmed: \(error)")
+      }
+      do {
+        print("Cursor \(operation) process remaining members: \(try await ownership.members())")
+      } catch {
+        print("Cursor \(operation) process membership unavailable: \(error)")
+      }
+    }
+  }
+  func call(
+    _ name: String, _ args: [String: JSONValue] = [:], gateway selected: GatewayRuntime? = nil,
+    startRequestID: String? = nil
+  ) async throws -> JSONValue {
+    var arguments: [String: JSONValue] = [
+      "server": .string("cursor-fixture"), "tool": .string(name), "arguments": .object(args),
+    ]
+    if let startRequestID {
+      arguments["request_id"] = .string(startRequestID)
+      arguments["wait_for_result"] = .bool(false)
+    }
+    return try await (selected ?? gateway!).callToolForMCPAsync(
+      name: "mcp.tools.call", arguments: .object(arguments), context: .empty)
+  }
+  func requestReceipt(_ id: String) async throws -> [String: JSONValue] {
+    try cursorValue(
+      try await gateway.callToolForMCPAsync(
+        name: "mcp.requests.read",
+        arguments: .object(["server": .string("cursor-fixture"), "request_id": .string(id)]),
+        context: .empty))
+  }
+  #if DEBUG
+    var vendorLaunches: [ExecutionObservations.Launch] {
+      base.observations.launches.filter { $0.executable != base.platform.gitExecutable }
+    }
+    func withStartupBarrier(
+      _ barrier: CursorStartupBarrier<CursorStartupBoundary>, body: () async throws -> Void
+    ) async throws {
+      let observation = CursorVendorStartupObservation.shared
+      await observation.set({ await barrier.park($0) }, projectID: projectID)
+      do {
+        try await body()
+      } catch {
+        barrier.release()
+        await observation.set(nil, projectID: projectID)
+        throw error
+      }
+      await observation.set(nil, projectID: projectID)
+    }
+    func withVendorReplyObserver(
+      _ observe: @escaping @Sendable (CursorStartupReply) async -> Bool,
+      release: () -> Void,
+      body: () async throws -> Void
+    ) async throws {
+      let observation = CursorVendorStartupObservation.shared
+      await observation.setReplyObserver(observe, projectID: projectID)
+      do {
+        try await body()
+      } catch {
+        release()
+        await observation.setReplyObserver(nil, projectID: projectID)
+        throw error
+      }
+      release()
+      await observation.setReplyObserver(nil, projectID: projectID)
+    }
+    func startupChildren(_ boundary: CursorStartupBoundary) throws
+      -> (probe: ExecutionRuntimeRecord.Child, workload: ExecutionRuntimeRecord.Child)
+    {
+      try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
+        try #require(ledger.executions[boundary.executionID]?.delegatedTo == .package("cursor"))
+        let record = try #require(try ExecutionRuntimeRecord.load(boundary.executionID, database))
+        let probe = try #require(record.children[boundary.probeID])
+        let workload = try #require(record.children[boundary.workloadID])
+        try #require(record.children.count == 2)
+        return (probe, workload)
+      }
+    }
+    func workloadJournal(_ boundary: CursorStartupBoundary) throws -> ExecutionRecoveryJournal.Entry
+    {
+      let path = base.database.permissionExecutionRoot.appendingPathComponent("ownership")
+        .appendingPathComponent(boundary.workloadID.uuidString + ".json")
+      let entry = try JSONDecoder().decode(
+        ExecutionRecoveryJournal.Entry.self, from: Data(contentsOf: path))
+      try #require(entry.child == boundary.workloadID && entry.execution == boundary.executionID)
+      try #require(entry.recovery.sandboxed)
+      return entry
+    }
+    func waitForNewWorkload(since index: Int) async throws -> Int32 {
+      let deadline = ContinuousClock.now + .seconds(5)
+      repeat {
+        if let launch = vendorLaunches.dropFirst(index).first(where: { $0.arguments == ["acp"] }) {
+          let pid = launch.member.processID
+          if try vendorEffects().contains(where: {
+            $0["phase"] == .string("workload") && $0["pid"]?.intValue == Int(pid)
+          }) {
+            try #require(launch.sandboxed)
+            return pid
+          }
+        }
+        try await Task.sleep(for: .milliseconds(20))
+      } while ContinuousClock.now < deadline
+      throw CursorFixtureError.deadline
+    }
+    func vendorRequestOwner(_ id: String) async throws -> (locator: JSONValue, connectionID: UUID) {
+      // A parked request has a host lease before the adapter can report a session resource.
+      let live = gateway.ownedWork.snapshot.filter { $0.kind == .mcpRequest && $0.resourceID == id }
+      try #require(
+        live.count == 1, "Pending MCP request \(id) in \(projectID), host leases \(live)")
+      let request = try #require(live.first)
+      try #require(request.projectID == projectID && request.registrationID == "cursor-fixture")
+      let connectionID = try #require(request.connectionID)
+      let report = try cursorValue(
+        try await gateway.callToolForMCPAsync(
+          name: "runtime.owners.list",
+          arguments: .object([
+            "project_id": .string(projectID), "server": .string("cursor-fixture"),
+          ]), context: .empty))
+      let owners = try #require(report["owners"]?.arrayValue)
+      let matches = owners.compactMap(\.objectValue).filter {
+        $0["kind"] == .string("mcpRequest") && $0["resource_id"] == .string(id)
+      }
+      let visible = owners.prefix(8).compactMap(\.objectValue).map {
+        [$0["kind"], $0["resource_id"], $0["connection_id"]]
+      }
+      try #require(
+        matches.count == 1, "Pending MCP request \(id) in \(projectID), public owners \(visible)")
+      let row = try #require(matches.first)
+      try #require(row["server"] == .string("cursor-fixture"))
+      try #require(row["connection_id"] == .string(connectionID.uuidString))
+      let locator = try #require(row["owner"])
+      let selected = try GatewayOwnerSelection(locator)
+      try #require(selected.runtimeID == gateway.generationID && selected.projectID == projectID)
+      try #require(selected.ownershipID == request.id)
+      print(
+        "Cursor startup request \(id) is owned by \(request.id) in \(projectID), connection \(connectionID)"
+      )
+      return (locator, connectionID)
+    }
+    func closeVendorConnection(_ owner: (locator: JSONValue, connectionID: UUID)) async throws
+      -> [String: JSONValue]
+    {
+      try cursorValue(
+        try await gateway.callToolForMCPAsync(
+          name: "runtime.owners.call",
+          arguments: .object([
+            "project_id": .string(projectID), "owner": owner.locator,
+            "tool": .string("mcp.connections.close"),
+            "arguments": .object(["server": .string("cursor-fixture")]),
+          ]), context: .empty))
+    }
+    func waitForStartupDrain(_ boundary: CursorStartupBoundary) async throws {
+      let deadline = ContinuousClock.now + .seconds(7)
+      repeat {
+        if await boundary.channelClosed(), boundary.receipts().workload == "never_dispatched" {
+          return
+        }
+        try await Task.sleep(for: .milliseconds(20))
+      } while ContinuousClock.now < deadline
+      throw CursorFixtureError.deadline
+    }
+  #endif
+  func waitRequestReceipt(_ id: String) async throws -> [String: JSONValue] {
+    let deadline = ContinuousClock.now + .seconds(5)
+    repeat {
+      let receipt = try await requestReceipt(id)
+      if receipt["state"] != .string("running") { return receipt }
+      try await Task.sleep(for: .milliseconds(20))
+    } while ContinuousClock.now < deadline
+    throw CursorFixtureError.deadline
+  }
+  func open() async throws -> String {
+    try #require(
+      try cursorValue(
+        try await call("cursor.acp.session.open", ["permission_policy": .string("manual")]))[
+          "session"]?.stringValue)
+  }
+  func prompt(_ session: String, _ prompt: String) async throws -> JSONValue {
+    try await call(
+      "cursor.acp.session.prompt", ["session": .string(session), "prompt": .string(prompt)])
+  }
+  func observedPrompt(
+    _ session: String, _ text: String, pid: Int32, started: ContinuousClock.Instant
+  ) async throws -> JSONValue {
+    reportIsolation("starting \(text) on \(pid)", started: started)
+    do {
+      let reply = try await prompt(session, text)
+      let outer = reply.objectValue?["structuredContent"]?.objectValue
+      let inner = outer?["result"]?.objectValue
+      let result = inner?["structuredContent"]?.objectValue?["result"]?.objectValue
+      let requestID = outer?["gateway_execution"]?.objectValue?["request_id"]?.stringValue
+      let audit = requestID.flatMap { try? base.database.auditEvent(requestID: $0) }
+      let outcome = JSONValue.object([
+        "request_id": requestID.map(JSONValue.string) ?? .null,
+        "gateway_duration_ms": audit?.durationMilliseconds.map { .integer(Int64($0)) } ?? .null,
+        "outer_error": outer?["error"] ?? .null,
+        "adapter_error": result?["error"] ?? .null,
+        "native_result": result?["native_result"] ?? .null,
+      ])
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys]
+      let data = try encoder.encode(outcome)
+      reportIsolation(
+        "\(text) returned " + String(decoding: data.prefix(2_048), as: UTF8.self),
+        started: started)
+      return reply
+    } catch {
+      reportIsolation("\(text) threw \(error)", started: started)
+      throw error
+    }
+  }
+  func reportIsolation(_ event: String, started: ContinuousClock.Instant) {
+    let elapsed = started.duration(to: .now).components
+    let elapsedMS = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
+    let wallMS = Int64(Date().timeIntervalSince1970 * 1_000)
+    print("Cursor isolation [\(wallMS) +\(elapsedMS)ms] \(event)")
+  }
+  func reportAcquisitionLifetimes(
+    _ acquisitions: [[String: Any]], started: ContinuousClock.Instant
+  ) {
+    let ids = acquisitions.compactMap {
+      ($0["execution"] as? String).flatMap(UUID.init(uuidString:))
+    }
+    do {
+      let states = try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
+        try ids.map { id -> String in
+          guard let execution = ledger.executions[id] else { return "\(id) unavailable" }
+          let record = try ExecutionRuntimeRecord.load(id, database)
+          let ended =
+            execution.endedAt.map {
+              String(Int64($0.timeIntervalSince1970 * 1_000))
+            } ?? "none"
+          let children =
+            record?.children.values.compactMap { child -> String? in
+              guard let pid = child.recovery?.root.processID else { return nil }
+              return "\(pid) completed=\(child.completed)"
+            }.sorted() ?? []
+          let limit = execution.limitEndReason?.rawValue ?? "none"
+          return
+            "\(id) running=\(execution.isRunning) end_ms=\(ended) limit_end=\(limit) children=\(children)"
+        }
+      }
+      for state in states { reportIsolation(state, started: started) }
+    } catch {
+      reportIsolation("ledger read failed \(error)", started: started)
+    }
+  }
+  func stop(_ session: String) async throws -> JSONValue {
+    try await call("cursor.acp.session.cancel", ["session": .string(session)])
+  }
+  func vendorEffects() throws -> [[String: JSONValue]] {
+    let home = try base.database.prepareProviderContainer(.package("cursor")).sandbox.home
+    let path = URL(fileURLWithPath: home.value).appendingPathComponent(
+      "cursor-vendor-effects.jsonl")
+    guard let data = try? String(contentsOf: path, encoding: .utf8) else { return [] }
+    return try data.split(separator: "\n").map {
+      try JSONDecoder().decode([String: JSONValue].self, from: Data($0.utf8))
+    }
+  }
+  func waitVendorPrompt(pid: Int32, prompt: String) async throws {
+    for _ in 0..<400 {
+      if try vendorEffects().contains(where: {
+        $0["pid"]?.intValue == Int(pid) && $0["phase"]?.stringValue == "prompt"
+          && $0["prompt"]?.stringValue == prompt
+      }) {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw CursorFixtureError.deadline
+  }
+  func vendorTurn(pid: Int32, prompt: String) throws -> [[String: JSONValue]] {
+    let rows = try vendorEffects()
+    let turn = rows.last {
+      $0["phase"]?.stringValue == "prompt" && $0["pid"]?.intValue == Int(pid)
+        && $0["prompt"]?.stringValue == prompt
+    }?["acp_id"]
+    return rows.filter {
+      turn != nil && $0["pid"]?.intValue == Int(pid) && $0["acp_id"] == turn
+    }
+  }
+  func reportStop(pid: Int32, prompt: String, stop: JSONValue, reply: JSONValue) {
+    let effects = (try? vendorTurn(pid: pid, prompt: prompt)) ?? []
+    let trace = JSONValue.object([
+      "prompt": .string(prompt), "peer_pid": .integer(Int64(pid)),
+      "peer": .array(effects.prefix(5).map(JSONValue.object)),
+      "stop": stop, "reply": reply,
+    ])
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    if let data = try? encoder.encode(trace) {
+      print("Cursor gate stop " + String(decoding: data.prefix(8_192), as: UTF8.self))
+    }
+  }
+  func verifyAcquisitions(
+    first: [ExecutionObservations.Launch], second: [ExecutionObservations.Launch], adapterPID: Int32
+  ) throws -> [[String: Any]] {
+    try gateway.permissionRuntime.store.readWithDatabase { database, ledger in
+      var rows: [[String: Any]] = []
+      var executions: Set<UUID> = []
+      var proofs: Set<UUID> = []
+      var children: Set<UUID> = []
+      for pair in [first, second] {
+        let pids = Set(pair.map { $0.member.processID })
+        var matched = false
+        for execution in ledger.executions.values where execution.delegatedTo == .package("cursor")
+        {
+          guard let record = try ExecutionRuntimeRecord.load(execution.id, database) else {
+            continue
+          }
+          let slots = record.children.filter { _, record in
+            record.recovery.map { pids.contains($0.root.processID) } ?? false
+          }
+          guard slots.count == 2 else { continue }
+          let newExecution = executions.insert(execution.id).inserted
+          try #require(!matched && newExecution)
+          matched = true
+          try #require(execution.authorizationIDs.count == 2)
+          for id in execution.authorizationIDs {
+            let newProof = proofs.insert(id).inserted
+            try #require(newProof && ledger.authorizations[id]?.executionID == execution.id)
+          }
+          for id in slots.keys {
+            let newChild = children.insert(id).inserted
+            try #require(newChild)
+          }
+          if rows.isEmpty {
+            try #require(
+              record.children.values.contains { $0.recovery?.root.processID == adapterPID })
+          } else {
+            try #require(record.children.count == 2)
+          }
+          let phaseIDs = try pair.map { launch in
+            try #require(slots.first(where: { $0.value.recovery?.root == launch.member })?.key)
+          }
+          rows.append([
+            "execution": execution.id.uuidString,
+            "authorization_ids": execution.authorizationIDs.map(\.uuidString).sorted(),
+            "adapter_pid": adapterPID,
+            "probe_pid": pair[0].member.processID,
+            "probe_child": phaseIDs[0].uuidString,
+            "workload_pid": pair[1].member.processID,
+            "workload_child": phaseIDs[1].uuidString,
+          ])
+        }
+        try #require(matched)
+      }
+      return rows
+    }
+  }
+  func waitPending(_ session: String) async throws -> [String: JSONValue] {
+    for _ in 0..<200 {
+      let value = try cursorValue(
+        try await call("cursor.acp.requests.list", ["session": .string(session)]))
+      if let item = value["requests"]?.arrayValue?.first?.objectValue { return item }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw CursorFixtureError.deadline
+  }
+  func waitStarted(_ session: String) async throws {
+    for _ in 0..<200 {
+      let value = try cursorValue(
+        try await call("cursor.acp.events.read", ["session": .string(session)]))
+      let rows = value["events"]?.arrayValue ?? []
+      if rows.contains(where: { row in
+        row.objectValue?["event"]?.objectValue?["params"]?.objectValue?["update"]?.objectValue?[
+          "content"]?.objectValue?["text"] == .string("started")
+      }) {
+        return
+      }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw CursorFixtureError.deadline
+  }
+  func waitResult(_ session: String, prompt: String) async throws -> [String: JSONValue] {
+    for _ in 0..<200 {
+      let value = try cursorValue(
+        try await call(
+          "cursor.acp.session.prompt.result",
+          ["session": .string(session), "prompt_id": .string(prompt)]))
+      if value["completed"] == .bool(true) { return value }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw CursorFixtureError.deadline
+  }
+  func removeWorktree() async throws {
+    _ = try cursorValue(
+      try await lifecycle.callToolForMCPAsync(
+        name: "git.worktree_remove",
+        arguments: .object(["project_id": .string(projectID), "force": .bool(true)]),
+        context: .init(session: base.session)))
+    removed = true
+    try #require(!FileManager.default.fileExists(atPath: worktree.path))
+  }
+  func requireJoined() async throws {
+    for _ in 0..<200 {
+      try await gateway.permissionRuntime.coordinator.reconcile()
+      var live = false
+      for ownership in base.observations.ownerships {
+        if try await ownership.members().isEmpty == false { live = true }
+      }
+      if !live { return }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    throw CursorFixtureError.deadline
+  }
+  func close() async throws {
+    await gateway?.shutdown()
+    await other?.shutdown()
+    if !removed { try await removeWorktree() }
+    try await requireJoined()
+    try await base.requireNoScratch()
+    await lifecycle.shutdown()
+    base.session.end()
+    await base.runtime.shutdown()
+    try FileManager.default.removeItem(at: base.root)
+    try #require(!FileManager.default.fileExists(atPath: base.root.path))
+  }
+}
+private enum CursorFixtureError: Error { case deadline }

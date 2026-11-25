@@ -17,6 +17,11 @@ commands = ["python3"]
 instructions = "Provide Python 3.13 or newer on the Computer MCP launch PATH. The plugin does not install Python."
 documentation = "https://www.python.org/downloads/"
 
+[[permissions]]
+id = "project"
+access = "write"
+purpose = "Open Cursor sessions and run requested project tasks and edits in owner-selected worktrees, including cancellation and native response delivery."
+
 [[cli]]
 id = "agent"
 executable = { dependency = "cursor-agent" }
@@ -29,6 +34,8 @@ transport = "stdio"
 executable = { path = "bin/cursor-mcp-adapter" }
 prefix = "cursor"
 capabilities = ["tools", "resources"]
+requirements = { project = "write" }
+tool_requirements = { "cursor.acp.session.prompt.result" = { project = "read" }, "cursor.acp.session.list" = { project = "read" }, "cursor.acp.events.read" = { project = "read" }, "cursor.acp.requests.list" = { project = "read" } }
 
 [[skills]]
 id = "cursor-agent"

@@ -27,6 +27,23 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(tomllib.loads(archive.read('computer-mcp-plugin.toml').decode()),manifest)
             self.assertIn('cli-tree.json',names)
             self.assertIn('bin/plugin_runtime.py',names)
+            signature = json.loads(archive.read('cursor-vendor-execution.json'))
+            tree = json.loads(archive.read('cli-tree.json'))
+            self.assertEqual(signature, {
+                'capability': 'io.github.computer-mcp/vendor-execution-v1',
+                'dependency': 'cursor-agent',
+                'acquire': ['cursor.acp.session.open', 'cursor.acp.prompt'],
+                'probe': ['--version'],
+                'workload': ['acp'],
+                'version_stdout': next(check['stdout'] for check in tree['executable_checks']
+                                       if check['args'] == ['--version']),
+            })
+            self.assertIn(signature['dependency'], {dependency['id'] for dependency in manifest['dependencies']})
+            [acp] = manifest['mcp']
+            self.assertEqual((acp['id'], acp['transport']), ('acp', 'stdio'))
+            for name in ('cursor-vendor-execution.json', 'bin/cursor_vendor_execution.py',
+                         'bin/plugin_runtime.py', acp['executable']['path']):
+                self.assertEqual(archive.read(name), (ROOT / name).read_bytes())
             assets={'.github/assets/logo/logo-light.png', '.github/assets/logo/logo-dark.png'}
             self.assertEqual({name for name in names if name.startswith('.github/')},assets)
             for name in assets:
