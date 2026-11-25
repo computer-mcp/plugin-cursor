@@ -54,8 +54,10 @@ python3 scripts/validate_host_source.py \
   --output /absolute/path/to/plugin-cursor/.agent/host6/source-run
 ```
 
-Both SHA placeholders must be replaced with reviewed commits. The final host pin and CI
-acquisition remain integration-owner decisions. Python is the driver's current interpreter
+Replace both SHA placeholders with reviewed commits. The registered CI job uses
+the plugin commit under test and fetches [the pinned Host SHA](../../.github/computer-mcp-host.sha)
+from the public Host repository. The SHA must be publicly fetchable before CI can pass.
+Python is the driver's current interpreter
 (recorded with its hash); the host launch environment must independently supply Python
 3.13+ for the adapter. The driver does not alter PATH or install dependencies.
 

@@ -55,6 +55,11 @@ struct CursorSourceIntegrationTests {
       let a = try await h.open()
       let warm = h.mcpObservations.members.count
       let b = try await h.open()
+      let aRoute = try await h.observeSession(a)
+      let bRoute = try await h.observeSession(b)
+      try #require(aRoute.connectionID == bRoute.connectionID)
+      try #require(aRoute.instanceID == bRoute.instanceID)
+      try #require(aRoute.acquiredBy != bRoute.acquiredBy)
       let peers = try h.vendorEffects()
       try #require(
         peers.compactMap { $0["phase"]?.stringValue } == ["probe", "workload", "probe", "workload"])
@@ -102,8 +107,18 @@ struct CursorSourceIntegrationTests {
       try #require(stopped["stop_reason"] == .string("cancelled"))
       try #require(
         stopped["native_result"]?.objectValue?["usage"]?.objectValue?["tokens"] == .integer(3))
-      try #require(try await aOwner.members().contains(where: { $0.processID == aPID }))
-      _ = try cursorValue(try await h.prompt(a, "hello after cancellation"))
+      try #require(stopped["closed"] == .bool(false))
+      try #require(try await aOwner.members().contains(aRoot))
+      let afterStop = try cursorValue(
+        try await h.call("cursor.acp.requests.list", ["session": .string(a)]))
+      try #require(afterStop["requests"] == .array([]))
+      let resumed = try cursorValue(try await h.prompt(a, "hello after cancellation"))
+      try #require(
+        resumed["session"] == .string(a) && resumed["stop_reason"] == .string("end_turn"))
+      try await h.waitVendorPrompt(pid: aPID, prompt: "hello after cancellation")
+      try #require(try await h.observeSession(a) == aRoute)
+      try #require(try await h.observeSession(b) == bRoute)
+      try h.requireMCPLaunches(since: baseline, exactly: roots + [adapter])
 
       async let interactive = h.prompt(a, "permission-on-cancel")
       _ = try await h.waitPending(a)
@@ -216,6 +231,7 @@ struct CursorSourceIntegrationTests {
       try #require(bSettled.map { $0["phase"]?.stringValue } == ["prompt", "cancel", "terminal"])
       try #require(bSettled.last?["acp_id"]?.intValue == bNativeID)
       try #require(bSettled.last?["outcome"]?.objectValue?["result"] == won["native_result"])
+      try #require(try await h.observeSession(b) == bRoute)
       let freshB = try await h.verifySiblingIO(b, root: bRoot, suffix: "forced-stop")
       let freshTurn = try h.vendorTurn(pid: bPID, prompt: freshB)
       let freshNativeID = try #require(freshTurn.first?["acp_id"]?.intValue)
@@ -294,7 +310,7 @@ struct CursorSourceIntegrationTests {
         trial["probe_pid"] = Int(probeRoot.processID)
         if withdraw {
           let cancelled = try cursorValue(
-            try await h.gateway.callToolForMCPAsync(
+            try await h.consumer.generations.callToolForMCPAsync(
               name: "mcp.requests.cancel",
               arguments: .object([
                 "server": .string("cursor-fixture"), "request_id": .string(requestID),
@@ -331,6 +347,7 @@ struct CursorSourceIntegrationTests {
           try #require(hostReceipt["retired"] == .bool(false))
           try #require(terminal["state"] == .string("succeeded"), "\(terminal)")
           let session = try #require(try cursorValue(reply)["session"]?.stringValue)
+          _ = try await h.observeSession(session)
           let live = try h.startupChildren(boundary)
           let root = try #require(live.workload.recovery?.root)
           try #require(!live.workload.completed && live.workload.recovery?.sandboxed == true)
@@ -741,9 +758,7 @@ struct CursorSourceIntegrationTests {
       let second = try h.makeConsumer("cursor-second", caller: 2, use: true)
       h.other = second
       try await h.discover(gateway: second)
-      let secondSession = try #require(
-        try cursorValue(try await h.call("cursor.acp.session.open", gateway: second))["session"]?
-          .stringValue)
+      let secondSession = try await h.open(gateway: second)
       let service = h.gateway.permissionRuntime.service
       _ = try service.revokePermission(
         .plugin("cursor"), profileID: h.consumerID, owner: h.owner,
@@ -857,6 +872,11 @@ private struct CursorTransportEvent: Decodable {
   var result: [String: JSONValue]? { reply?["result"]?.objectValue }
 }
 
+private struct CursorConsumer {
+  let runtime: GatewayRuntime
+  let generations: GatewayStandaloneGenerations
+}
+
 private final class CursorHarness: @unchecked Sendable {
   let base: FixedHostFixture
   // The real proxy's launcher observes adapter and vendor starts independently
@@ -870,8 +890,9 @@ private final class CursorHarness: @unchecked Sendable {
   let outside: [URL]
   let owner: GatewayPermissionOwner
   let consumerID = GatewayProfileID(rawValue: "cursor-consumer")!
-  var gateway: GatewayRuntime!
-  var other: GatewayRuntime?
+  var consumer: CursorConsumer!
+  var gateway: GatewayRuntime { consumer.runtime }
+  var other: CursorConsumer?
   var removed = false
 
   init(
@@ -1053,7 +1074,7 @@ private final class CursorHarness: @unchecked Sendable {
       let lifecycleProfile = try #require(
         base.database.profiles().first { $0.id == base.configuration.runtime.profileID })
       stage = "consumer generation"
-      h.gateway = try h.makeConsumer("cursor-consumer", caller: caller, use: use)
+      h.consumer = try h.makeConsumer("cursor-consumer", caller: caller, use: use)
       try #require(
         base.database.profiles().first { $0.id == lifecycleProfile.id } == lifecycleProfile)
       try #require(base.observations.members.count == beforeSettings)
@@ -1109,7 +1130,7 @@ private final class CursorHarness: @unchecked Sendable {
       return (try? String(contentsOf: path, encoding: .utf8).split(separator: "\n").count) ?? 0
     }
   }
-  func makeConsumer(_ name: String, caller: Int, use: Bool) throws -> GatewayRuntime {
+  func makeConsumer(_ name: String, caller: Int, use: Bool) throws -> CursorConsumer {
     let id = try #require(GatewayProfileID(rawValue: name))
     try #require(id != .localAdmin && id != base.configuration.runtime.profileID)
     var permissions = fixturePermissions([
@@ -1132,14 +1153,14 @@ private final class CursorHarness: @unchecked Sendable {
       mcpClient: MCPProxyClient(launcher: testExecutionLauncher(observations: mcpObservations)),
       plugins: [plugin], bundledPlugins: .init(packages: [], issues: []))
     _ = try gateway.makeControlSession()
-    return gateway
+    return .init(runtime: gateway, generations: GatewayStandaloneGenerations(gateway))
   }
-  func catalog(gateway selected: GatewayRuntime? = nil) async throws -> JSONValue {
-    try await (selected ?? gateway!).callToolForMCPAsync(
+  func catalog(gateway selected: CursorConsumer? = nil) async throws -> JSONValue {
+    try await (selected ?? consumer!).generations.callToolForMCPAsync(
       name: "mcp.tools.list", arguments: .object(["server": .string("cursor-fixture")]),
       context: .empty)
   }
-  func discover(gateway selected: GatewayRuntime? = nil) async throws {
+  func discover(gateway selected: CursorConsumer? = nil) async throws {
     let firstOwnership = mcpObservations.ownerships.count
     let result = try await catalog(gateway: selected)
     if result.objectValue?["isError"] == .bool(true) {
@@ -1195,7 +1216,7 @@ private final class CursorHarness: @unchecked Sendable {
     }
   }
   func call(
-    _ name: String, _ args: [String: JSONValue] = [:], gateway selected: GatewayRuntime? = nil,
+    _ name: String, _ args: [String: JSONValue] = [:], gateway selected: CursorConsumer? = nil,
     startRequestID: String? = nil
   ) async throws -> JSONValue {
     var arguments: [String: JSONValue] = [
@@ -1205,12 +1226,18 @@ private final class CursorHarness: @unchecked Sendable {
       arguments["request_id"] = .string(startRequestID)
       arguments["wait_for_result"] = .bool(false)
     }
-    return try await (selected ?? gateway!).callToolForMCPAsync(
-      name: "mcp.tools.call", arguments: .object(arguments), context: .empty)
+    let client = selected ?? consumer!
+    do {
+      return try await client.generations.callToolForMCPAsync(
+        name: "mcp.tools.call", arguments: .object(arguments), context: .empty)
+    } catch {
+      return client.runtime.routingErrorForMCP(
+        error, name: "mcp.tools.call", arguments: .object(arguments), invocationContext: .empty)
+    }
   }
   func requestReceipt(_ id: String) async throws -> [String: JSONValue] {
     try cursorValue(
-      try await gateway.callToolForMCPAsync(
+      try await consumer.generations.callToolForMCPAsync(
         name: "mcp.requests.read",
         arguments: .object(["server": .string("cursor-fixture"), "request_id": .string(id)]),
         context: .empty))
@@ -1463,7 +1490,7 @@ private final class CursorHarness: @unchecked Sendable {
     try #require(request.projectID == projectID && request.registrationID == "cursor-fixture")
     let connectionID = try #require(request.connectionID)
     let report = try cursorValue(
-      try await gateway.callToolForMCPAsync(
+      try await consumer.generations.callToolForMCPAsync(
         name: "runtime.owners.list",
         arguments: .object([
           "project_id": .string(projectID), "server": .string("cursor-fixture"),
@@ -1493,7 +1520,7 @@ private final class CursorHarness: @unchecked Sendable {
     -> [String: JSONValue]
   {
     try cursorValue(
-      try await gateway.callToolForMCPAsync(
+      try await consumer.generations.callToolForMCPAsync(
         name: "runtime.owners.call",
         arguments: .object([
           "project_id": .string(projectID), "owner": owner.locator,
@@ -1510,12 +1537,42 @@ private final class CursorHarness: @unchecked Sendable {
     } while ContinuousClock.now < deadline
     throw CursorFixtureError.deadline
   }
-  func open() async throws -> String {
-    try #require(
+  func open(gateway selected: CursorConsumer? = nil) async throws -> String {
+    let session = try #require(
       try cursorValue(
-        try await call("cursor.acp.session.open", ["permission_policy": .string("manual")]))[
-          "session"]?.stringValue)
+        try await call(
+          "cursor.acp.session.open", ["permission_policy": .string("manual")], gateway: selected
+        ))["session"]?.stringValue)
+    _ = try await observeSession(session, gateway: selected)
+    return session
   }
+
+  func observeSession(_ session: String, gateway selected: CursorConsumer? = nil) async throws
+    -> MCPContinuationDirectory.Match
+  {
+    let runtime = (selected ?? consumer!).runtime
+    let arguments = JSONValue.object([
+      "server": .string("cursor-fixture"), "tool": .string("cursor.acp.requests.list"),
+      "arguments": .object(["session": .string(session)]),
+    ])
+    // Wait only for the Host's asynchronous ownership report; no tool is dispatched here.
+    let deadline = ContinuousClock.now + .seconds(5)
+    repeat {
+      let lookups = try runtime.continuationLookups(
+        name: "mcp.tools.call", arguments: arguments, projectID: projectID)
+      let reports = lookups.flatMap { $0.observation.matches }
+      if !reports.isEmpty {
+        try #require(reports.count == 1)
+        let report = try #require(reports.first)
+        try #require(report.connected && !report.uncertain)
+        return report
+      }
+      try await Task.sleep(for: .milliseconds(20))
+    } while ContinuousClock.now < deadline
+    Issue.record("Host did not observe the Cursor session owner")
+    throw CursorFixtureError.deadline
+  }
+
   func prompt(_ session: String, _ prompt: String) async throws -> JSONValue {
     try await call(
       "cursor.acp.session.prompt", ["session": .string(session), "prompt": .string(prompt)])
@@ -1755,7 +1812,7 @@ private final class CursorHarness: @unchecked Sendable {
   }
   func requireJoined() async throws {
     for _ in 0..<200 {
-      try await (gateway ?? base.runtime).permissionRuntime.coordinator.reconcile()
+      try await (consumer?.runtime ?? base.runtime).permissionRuntime.coordinator.reconcile()
       var live = false
       for ownership in base.observations.ownerships + mcpObservations.ownerships {
         if try await ownership.members().isEmpty == false { live = true }
@@ -1766,8 +1823,8 @@ private final class CursorHarness: @unchecked Sendable {
     throw CursorFixtureError.deadline
   }
   func close() async throws {
-    await gateway?.shutdown()
-    await other?.shutdown()
+    await consumer?.generations.shutdown()
+    await other?.generations.shutdown()
     let cleanupError: (any Error)?
     do {
       if !removed { try await removeWorktree() }
