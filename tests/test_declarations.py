@@ -7,7 +7,6 @@ READ = {'cursor.acp.session.prompt.result', 'cursor.acp.session.list', 'cursor.a
 
 class DeclarationTests(unittest.TestCase):
     def test_manifest_matches_actual_catalog(self):
-        (ROOT / '.agent/host6').mkdir(parents=True, exist_ok=True)
         manifest = tomllib.loads((ROOT / 'computer-mcp-plugin.toml').read_text())
         self.assertEqual(manifest['permissions'], [{'id': 'project', 'access': 'write', 'purpose': 'Open Cursor sessions and run requested project tasks and edits in owner-selected worktrees, including cancellation and native response delivery.'}])
         self.assertNotIn('sandbox', manifest)
@@ -15,7 +14,7 @@ class DeclarationTests(unittest.TestCase):
         mcp = manifest['mcp'][0]
         self.assertEqual(mcp['requirements'], {'project': 'write'})
         self.assertEqual(mcp['tool_requirements'], {name: {'project': 'read'} for name in READ})
-        with tempfile.TemporaryDirectory(dir=ROOT / '.agent/host6') as temp:
+        with tempfile.TemporaryDirectory() as temp:
             client = Client(temp)
             try:
                 tools = client.request('tools/list')['result']['tools']

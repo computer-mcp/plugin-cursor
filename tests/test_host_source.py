@@ -18,10 +18,6 @@ spec.loader.exec_module(driver)
 
 
 class HostSourceTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        (ROOT / '.agent/host6').mkdir(parents=True, exist_ok=True)
-
     def test_cli_requires_explicit_sources_and_commits(self):
         result = subprocess.run([sys.executable, str(ROOT / 'scripts/validate_host_source.py'), '--help'], capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0)
@@ -87,15 +83,36 @@ class HostSourceTests(unittest.TestCase):
         with patch.object(driver, 'git', side_effect=[str(ROOT), sha, '?? untracked']):
             with self.assertRaises(ValueError): driver.verify_source(ROOT, sha)
 
-    def test_only_ignored_run_outputs(self):
-        host = Path('/separate/host')
-        with self.assertRaises(ValueError): driver.validate_locations(host, ROOT, ROOT / 'output')
-        with self.assertRaises(ValueError): driver.validate_locations(ROOT, ROOT, ROOT / '.agent/host6/run')
-        driver.validate_locations(host, ROOT, ROOT / '.agent/host6/not-created')
+    def test_only_fresh_external_run_outputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            host = root / 'sources' / 'host'
+            plugin = root / 'sources' / 'plugin'
+            host.mkdir(parents=True)
+            plugin.mkdir()
+            output = root / 'evidence' / 'run'
+            self.assertEqual(driver.validate_locations(host, plugin, output), output)
+            self.assertFalse(output.parent.exists())
+
+            existing = root / 'existing'
+            existing.mkdir()
+            file = root / 'file'
+            file.touch()
+            host_alias = root / 'host-alias'
+            host_alias.symlink_to(host, target_is_directory=True)
+            dangling = root / 'dangling'
+            dangling.symlink_to(output)
+            for invalid in (Path('relative'), host, plugin, host / 'run', plugin / 'run',
+                            host.parent, root, existing, file, host_alias / 'run', dangling):
+                with self.subTest(output=invalid), self.assertRaises(ValueError):
+                    driver.validate_locations(host, plugin, invalid)
+            for first, second in ((host, host), (host, host / 'nested'), (plugin / 'nested', plugin)):
+                with self.subTest(host=first, plugin=second), self.assertRaises(ValueError):
+                    driver.validate_locations(first, second, output)
 
     def test_snapshot_rejects_links_and_path_escape(self):
         for name, kind in (('../escape', tarfile.REGTYPE), ('link', tarfile.SYMTYPE)):
-            with tempfile.TemporaryDirectory(dir=ROOT / '.agent/host6') as temp:
+            with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp); archive = root / 'source.tar'
                 with tarfile.open(archive, 'w') as tar:
                     item = tarfile.TarInfo(name); item.type = kind; item.linkname = '/tmp/target'; tar.addfile(item)
@@ -105,9 +122,10 @@ class HostSourceTests(unittest.TestCase):
     def test_staged_run_records_pair_and_removes_owned_snapshots(self):
         import shutil
         from types import SimpleNamespace
-        with tempfile.TemporaryDirectory(dir=ROOT / '.agent/host6') as temp:
-            output = Path(temp) / 'run'
-            args = SimpleNamespace(host_source=Path('/separate/host'), plugin_source=ROOT, suite='source',
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            output = root / 'run'
+            args = SimpleNamespace(host_source=root / 'host', plugin_source=ROOT, suite='source',
                                    host_sha='a' * 40, plugin_sha='b' * 40, output=output, timeout=3)
             def export(root, sha, destination, environment, work):
                 destination.mkdir()
@@ -138,7 +156,7 @@ class HostSourceTests(unittest.TestCase):
             for name in ('host-source', 'plugin-source', 'build'): self.assertFalse((output / name).exists())
 
     def test_bounded_command_failure_and_timeout(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / '.agent/host6') as temp:
+        with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); log = root / 'process.log'
             driver.run_process([sys.executable, '-c', 'print("ok")'], root, dict(os.environ), log, 3)
             self.assertEqual(log.read_text(), 'ok\n')

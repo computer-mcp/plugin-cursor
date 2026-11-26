@@ -40,8 +40,9 @@ CI runs deterministic fixture tests and packaging; it does not install a vendor 
 ## Deterministic source consumer
 
 Use explicit clean host and plugin repository roots and full lowercase 40-character
-commit SHAs. The driver verifies both HEADs and clean status, exports committed sources
-into a fresh ignored run directory, and injects the companion fixture into the isolated
+commit SHAs. Choose a fresh absolute output path outside both checkouts and their
+ancestors. The driver verifies both HEADs and clean status, exports committed sources
+into the output directory, and injects the companion fixture into the isolated
 host snapshot. It uses the real package identity, declaration review, provider grants,
 separate consumer profiles and host-owned worktrees. No installed App, production control
 socket or moving ref is used. The host test target must provide its
@@ -51,12 +52,14 @@ committed `FixedHostFixture`, permission fixtures and standalone generation API.
 python3 scripts/validate_host_source.py \
   --host-source /absolute/path/to/host --host-sha FULL_HOST_SHA \
   --plugin-source /absolute/path/to/plugin-cursor --plugin-sha FULL_PLUGIN_SHA \
-  --output /absolute/path/to/plugin-cursor/.agent/host6/source-run
+  --output /absolute/path/to/validation-runs/cursor-source-run
 ```
 
 Replace both SHA placeholders with reviewed commits. The registered CI job uses
 the plugin commit under test and fetches [the pinned Host SHA](../../.github/computer-mcp-host.sha)
 from the public Host repository. The SHA must be publicly fetchable before CI can pass.
+CI writes the run to the runner's temporary directory and uploads its receipt, case
+evidence and logs.
 Python is the driver's current interpreter
 (recorded with its hash); the host launch environment must independently supply Python
 3.13+ for the adapter. The driver does not alter PATH or install dependencies.

@@ -1,6 +1,6 @@
 """Run the deterministic Cursor companion against explicit clean source commits.
 
-The driver exports both commits into an ignored run directory. It never edits
+The driver exports both commits into a fresh external run directory. It never edits
 input checkouts, contacts an installed App or launches the vendor's executable.
 """
 
@@ -81,15 +81,16 @@ def contains(parent, child):
 def validate_locations(host, plugin, output):
     if contains(host, plugin) or contains(plugin, host):
         raise ValueError("Host and plugin must be separate, non-nested source checkouts")
-    owned = plugin / ".agent/host6"
-    if not contains(owned, output) or output == owned:
-        raise ValueError("Output must be a new run directory under plugin .agent/host6")
-    if contains(host, output):
-        raise ValueError("Output must be outside the host source")
-    if not git(plugin, "check-ignore", str(output / "receipt.json")):
-        raise ValueError("Run output must be ignored")
-    if output.exists() or output.is_symlink():
-        raise ValueError("Output must be a new directory")
+    if not output.is_absolute():
+        raise ValueError("Output must be an absolute path")
+    if output.is_symlink():
+        raise ValueError("Output must be a new external directory")
+    output = output.resolve()
+    if any(contains(root, output) or contains(output, root) for root in (host, plugin)):
+        raise ValueError("Output must be outside both source checkouts and their ancestors")
+    if output.exists():
+        raise ValueError("Output must be a new external directory")
+    return output
 
 
 def run_process(command, cwd, environment, log, timeout):
@@ -284,13 +285,12 @@ def validate_start_recovery(lost, closure):
 
 
 def run(args):
-    validate_locations(args.host_source, args.plugin_source, args.output)
+    output = validate_locations(args.host_source, args.plugin_source, args.output)
     verify_source(args.host_source, args.host_sha)
     verify_source(args.plugin_source, args.plugin_sha)
     suite = args.suite
     before = {name: digest(args.plugin_source / name) for name in INPUTS}
-    args.output.mkdir(parents=True)
-    output = args.output
+    output.mkdir(parents=True)
     host = output / "host-source"
     plugin = output / "plugin-source"
     evidence = output / "cases.json"
@@ -381,7 +381,8 @@ def main(argv=None):
     parser.add_argument("--host-sha", required=True, type=revision)
     parser.add_argument("--plugin-source", required=True, type=absolute)
     parser.add_argument("--plugin-sha", required=True, type=revision)
-    parser.add_argument("--output", required=True, type=absolute)
+    parser.add_argument("--output", required=True, type=Path,
+                        help="fresh absolute directory outside both source checkouts and their ancestors")
     parser.add_argument("--suite", choices=SELECTORS, default="source")
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args(argv)
