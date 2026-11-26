@@ -110,6 +110,42 @@ class HostSourceTests(unittest.TestCase):
                 with self.subTest(host=first, plugin=second), self.assertRaises(ValueError):
                     driver.validate_locations(first, second, output)
 
+    def test_case_aliases_follow_filesystem_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            sources = root / 'sources'
+            host = sources / 'host'
+            plugin = sources / 'plugin'
+            host.mkdir(parents=True)
+            plugin.mkdir()
+            host_alias = sources / 'HOST'
+            plugin_alias = sources / 'PLUGIN'
+            candidates = (host_alias / 'fresh' / 'run', plugin_alias / 'fresh' / 'run')
+
+            if host_alias.exists():
+                self.assertTrue(host_alias.samefile(host))
+                self.assertTrue(plugin_alias.samefile(plugin))
+                for output in (*candidates, root / 'SOURCES'):
+                    with self.subTest(output=output), self.assertRaisesRegex(ValueError, 'outside both'):
+                        driver.validate_locations(host, plugin, output)
+                with self.assertRaisesRegex(ValueError, 'separate, non-nested'):
+                    driver.validate_locations(host, host_alias, root / 'evidence')
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / 'scripts/validate_host_source.py'),
+                     '--host-source', str(host), '--host-sha', 'a' * 40,
+                     '--plugin-source', str(plugin), '--plugin-sha', 'b' * 40,
+                     '--output', str(candidates[0])],
+                    capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('Source verification failed: Output must be outside both', result.stderr)
+            else:
+                for output in candidates:
+                    with self.subTest(output=output):
+                        self.assertEqual(driver.validate_locations(host, plugin, output), output)
+
+            for output in candidates:
+                self.assertFalse(output.parent.exists())
+
     def test_snapshot_rejects_links_and_path_escape(self):
         for name, kind in (('../escape', tarfile.REGTYPE), ('link', tarfile.SYMTYPE)):
             with tempfile.TemporaryDirectory() as temp:

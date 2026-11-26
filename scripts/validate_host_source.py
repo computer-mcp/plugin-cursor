@@ -78,15 +78,33 @@ def contains(parent, child):
     return child == parent or parent in child.parents
 
 
+def location_contains(parent, child):
+    if contains(parent, child):
+        return True
+    try:
+        parent_info = parent.stat()
+    except FileNotFoundError:
+        return False
+    # A fresh output can have missing components beneath an existing ancestor.
+    for path in (child, *child.parents):
+        try:
+            path_info = path.stat()
+        except FileNotFoundError:
+            continue
+        if os.path.samestat(parent_info, path_info):
+            return True
+    return False
+
+
 def validate_locations(host, plugin, output):
-    if contains(host, plugin) or contains(plugin, host):
+    if location_contains(host, plugin) or location_contains(plugin, host):
         raise ValueError("Host and plugin must be separate, non-nested source checkouts")
     if not output.is_absolute():
         raise ValueError("Output must be an absolute path")
     if output.is_symlink():
         raise ValueError("Output must be a new external directory")
     output = output.resolve()
-    if any(contains(root, output) or contains(output, root) for root in (host, plugin)):
+    if any(location_contains(root, output) or location_contains(output, root) for root in (host, plugin)):
         raise ValueError("Output must be outside both source checkouts and their ancestors")
     if output.exists():
         raise ValueError("Output must be a new external directory")
