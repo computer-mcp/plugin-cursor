@@ -583,7 +583,10 @@ struct CursorSourceIntegrationTests {
     try #require(package.manifest.id == "cursor")
     try #require(package.manifest.permissions?.map(\.id) == [.project])
     try #require(package.manifest.permissions?.first?.access == .write)
-    try #require(package.manifest.sandbox == nil)
+    let sandbox = try #require(package.manifest.sandbox)
+    try #require(!sandbox.fullAccess && sandbox.readExceptions == nil)
+    try #require(
+      sandbox.network == .custom(hosts: ["api2.cursor.sh", "api5.cursor.sh"], includeTrusted: false))
     let requirements = try PluginContributionRequirements(
       sourceDigest: PluginStore.manifestDigest(package.manifest),
       declarations: .init(package.manifest), componentID: "acp")
