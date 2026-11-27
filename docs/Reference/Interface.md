@@ -100,11 +100,11 @@ stdio clients use the local supervisor and select the executable through
 
 The adapter initializes ACP and calls `authenticate` with the advertised
 `cursor_login` method before creating or loading a session. An authentication
-RPC rejection stops setup. The adapter reports `authentication_required` when
-ACP requires authentication or the pinned Cursor CLI reports that its browser
-sign-in could not complete. Other authentication rejections report
-`vendor_error`. Both include the original RPC code and a fixed login hint.
-[Cursor ACP](https://cursor.com/docs/cli/acp)
+RPC rejection stops setup. The adapter reports `authentication_required` for
+ACP Authentication Required (`-32000`) and `vendor_error` for other
+authentication rejections. Both include the original RPC code and a fixed
+login hint. [Cursor ACP](https://cursor.com/docs/cli/acp) ·
+[ACP error codes](https://agentclientprotocol.com/protocol/v1/schema#errorcode)
 
 ## Tools
 

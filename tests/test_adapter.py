@@ -31,8 +31,8 @@ class AdapterTests(unittest.TestCase):
         cases = [
             (-32000, 'fixture-sensitive-message', 'authentication_required'),
             (-32602, 'Failed to open browser for login. Please visit: https://example.test/fixture-sensitive-url',
-             'authentication_required'),
-            (-32602, 'Unknown authentication method: fixture-sensitive-message', 'vendor_error'),
+             'vendor_error'),
+            (-32603, 'fixture-sensitive-message', 'vendor_error'),
         ]
         for rpc_code, message, expected in cases:
             with self.subTest(rpc_code=rpc_code, expected=expected), tempfile.TemporaryDirectory() as directory:
@@ -49,6 +49,7 @@ class AdapterTests(unittest.TestCase):
                     self.assertIn(f'RPC code {rpc_code}', error['message'])
                     self.assertIn('Run `agent login` in the same Cursor Agent context.', error['message'])
                     self.assertNotIn('fixture-sensitive', json.dumps(response))
+                    self.assertNotIn('https://example.test/', json.dumps(response))
                     self.assertEqual(self.value(client.call('cursor.acp.session.list'))['sessions'], [])
                 finally:
                     client.close()

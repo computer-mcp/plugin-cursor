@@ -296,12 +296,7 @@ class Session:
                         settled_rpc_error = kind == 'prompt' and self.managed is not None
                         if method == 'authenticate':
                             hint = 'Run `agent login` in the same Cursor Agent context.'
-                            detail = message['error']['message']
-                            # Cursor's browser login failures use Invalid Params in the pinned CLI.
-                            if code == ACP_AUTH_REQUIRED or (code == -32602 and (
-                                detail == 'Login failed or timed out. Please try again.'
-                                or detail.startswith('Failed to open browser for login. Please visit: ')
-                            )):
+                            if code == ACP_AUTH_REQUIRED:
                                 raise Failure('authentication_required', f'Cursor sign-in required (RPC code {code}). {hint}')
                             raise Failure('vendor_error', f'Cursor rejected authenticate (RPC code {code}). {hint}')
                         raise Failure('vendor_error',f'Cursor rejected {method} (RPC code {code}); no request was replayed')
