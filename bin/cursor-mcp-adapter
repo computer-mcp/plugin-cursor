@@ -21,6 +21,7 @@ VERSION = MANIFEST['version']
 POLICY = {'type':'string','enum':['reject-once','allow-once','allow-always','manual'],'default':'reject-once'}
 SESSION = text_schema(64)
 MODE = {'type':'string','enum':['agent','plan','ask']}
+ACP_AUTH_REQUIRED = -32000
 OPEN_FIELDS = {'resume_session_id':text_schema(512),'mode':MODE,'permission_policy':POLICY,'timeout_seconds':integer_schema(1,60,45)}
 PROMPT_FIELDS = {'prompt':text_schema(),'timeout_seconds':integer_schema(1,1800,300),'max_events':integer_schema(1,256,128)}
 
@@ -291,9 +292,18 @@ class Session:
                     if 'error' in message and (not isinstance(message['error'],dict) or type(message['error'].get('code')) is not int or not isinstance(message['error'].get('message'),str)):
                         raise Failure('invalid_vendor_response','ACP error has invalid fields')
                     if 'error' in message:
-                        error = message['error']
-                        code = error.get('code') if isinstance(error,dict) else None
+                        code = message['error']['code']
                         settled_rpc_error = kind == 'prompt' and self.managed is not None
+                        if method == 'authenticate':
+                            hint = 'Run `agent login` in the same Cursor Agent context.'
+                            detail = message['error']['message']
+                            # Cursor's browser login failures use Invalid Params in the pinned CLI.
+                            if code == ACP_AUTH_REQUIRED or (code == -32602 and (
+                                detail == 'Login failed or timed out. Please try again.'
+                                or detail.startswith('Failed to open browser for login. Please visit: ')
+                            )):
+                                raise Failure('authentication_required', f'Cursor sign-in required (RPC code {code}). {hint}')
+                            raise Failure('vendor_error', f'Cursor rejected authenticate (RPC code {code}). {hint}')
                         raise Failure('vendor_error',f'Cursor rejected {method} (RPC code {code}); no request was replayed')
                     value = message['result']
                     if not isinstance(value,dict):

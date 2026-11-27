@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -26,6 +27,35 @@ class AdapterTests(unittest.TestCase):
         r=self.value(self.call('prompt',{'prompt':'hello'}))
         self.assertEqual(r['text'],'hello');self.assertEqual(r['stop_reason'],'end_turn')
         self.assertEqual(self.value(self.call('session.list'))['sessions'],[])
+    def test_authentication_rejection_stops_before_native_session_setup(self):
+        cases = [
+            (-32000, 'fixture-sensitive-message', 'authentication_required'),
+            (-32602, 'Failed to open browser for login. Please visit: https://example.test/fixture-sensitive-url',
+             'authentication_required'),
+            (-32602, 'Unknown authentication method: fixture-sensitive-message', 'vendor_error'),
+        ]
+        for rpc_code, message, expected in cases:
+            with self.subTest(rpc_code=rpc_code, expected=expected), tempfile.TemporaryDirectory() as directory:
+                client = Client(directory, {
+                    'HOME': directory, 'CURSOR_SOURCE_FIXTURE': '1',
+                    'FIXTURE_AUTH_ERROR_CODE': str(rpc_code),
+                    'FIXTURE_AUTH_ERROR_MESSAGE': message,
+                })
+                try:
+                    response = client.call('cursor.acp.session.open')
+                    self.assertTrue(response['result']['isError'])
+                    error = Client.value(response)['error']
+                    self.assertEqual(error['code'], expected)
+                    self.assertIn(f'RPC code {rpc_code}', error['message'])
+                    self.assertIn('Run `agent login` in the same Cursor Agent context.', error['message'])
+                    self.assertNotIn('fixture-sensitive', json.dumps(response))
+                    self.assertEqual(self.value(client.call('cursor.acp.session.list'))['sessions'], [])
+                finally:
+                    client.close()
+                effects = (Path(directory) / 'cursor-vendor-effects.jsonl').read_text().splitlines()
+                self.assertEqual([json.loads(line)['phase'] for line in effects],
+                                 ['probe', 'workload', 'rejected_authentication'])
+                self.assertFalse((Path(directory) / 'cursor-native-starts.jsonl').exists())
     def test_reuse_session_and_explicit_native_resume(self):
         session=self.open(resume_session_id='saved-conversation',mode='plan')
         for prompt in ['first','second']:

@@ -21,13 +21,23 @@ does not authorize project execution. Runtime metadata never sets caller require
 CLI invocation retains Project write plus Plugin use; Skills consumption retains Skills
 plus Plugin use. Shipping a skill does not request provider Skills authority.
 
-The offline draft omits sandbox declarations: sandbox mode, network none and no existing
-user-config read exceptions. Provider HOME/cache/state are host-provisioned persistent
-container paths; temporary storage is execution-local. The host selects the worktree,
-protects unrelated projects/host data/other containers and retires writers before removal.
-This adapter does not request `projects-v1` or perform host lifecycle calls. Native login,
-config reads, network and any Full access choice require measured facts and an owner
-decision. The deterministic fixture does not establish real-model suitability.
+The sandbox requests a custom network ceiling of `api2.cursor.sh` for Cursor
+API requests and `api5.cursor.sh` for agent requests. The owner reviews that
+ceiling at enablement and must approve updates that widen it. The owner may
+narrow the selection, and Host policy limits effective access. Trusted
+hosts are excluded and Full access defaults to off.
+[Cursor ACP](https://cursor.com/docs/cli/acp) and
+[Cursor network configuration](https://cursor.com/docs/enterprise/network-configuration#ip-allowlisting)
+
+The owner initiates browser sign-in via `agent login` in the selected Cursor
+Agent context. The plugin network request covers only the agent/API hosts
+listed above. Provider HOME, cache and state use host-provisioned persistent
+container paths. Temporary storage is execution-local.
+[Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication)
+
+The host selects the worktree, protects unrelated projects, host data and
+other containers, and retires writers before removal. This adapter does not
+request `projects-v1` or perform host lifecycle calls.
 
 ## Host risk metadata
 
@@ -87,6 +97,14 @@ vendor channel before advertising managed execution. Managed startup requires
 that channel and does not fall back to launching a local child. Standalone
 stdio clients use the local supervisor and select the executable through
 `--executable`, `CURSOR_AGENT_EXECUTABLE`, or PATH.
+
+The adapter initializes ACP and calls `authenticate` with the advertised
+`cursor_login` method before creating or loading a session. An authentication
+RPC rejection stops setup. The adapter reports `authentication_required` when
+ACP requires authentication or the pinned Cursor CLI reports that its browser
+sign-in could not complete. Other authentication rejections report
+`vendor_error`. Both include the original RPC code and a fixed login hint.
+[Cursor ACP](https://cursor.com/docs/cli/acp)
 
 ## Tools
 

@@ -50,8 +50,9 @@ from `Examples/settings.json`.
 
 ## Install
 
-1. Install and authenticate Cursor Agent yourself, and provide Python 3.13 or newer on the
-   Computer MCP launch `PATH`. The plugin installs neither and never copies credentials.
+1. Install Cursor Agent and run `agent login` in the vendor context selected for
+   the plugin. Provide Python 3.13 or newer on the Computer MCP launch `PATH`.
+   [Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication)
 2. Build the archive:
 
    ```sh
@@ -64,9 +65,10 @@ from `Examples/settings.json`.
    through the same UI or `plugins configure`. The `cursor-agent` dependency selects the
    executable for the CLI and Host-managed ACP contributions.
 
-Review the provider Project-write purpose and MCP caller requirements in the manifest.
-The offline draft uses sandbox mode with network none and no user-config read exceptions;
-native login/network/config and execution-mode acceptance remain pending owner decisions.
+At enablement, review the provider Project-write request, MCP caller requirements
+and sandbox network request. The request covers `api2.cursor.sh` and
+`api5.cursor.sh`. The owner can narrow it, and Host policy still applies.
+Sandbox execution is the default.
 
 See the [installation guide](docs/Reference/Installation.md) for revisions, configuration
 publication and validation.

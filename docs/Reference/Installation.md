@@ -4,7 +4,13 @@
 
 The process supervisor requires the macOS `os.waitid` interface exposed by Python 3.13+. Older interpreters are rejected before any vendor process is started.
 
-Install and authenticate Cursor separately. The native executable version must match `cli-tree.json`; its `executable_checks` are applied before CLI calls and before adapter execution. The package does not install/update a vendor, perform interactive login, or copy credentials.
+Install Cursor Agent separately. In the vendor context selected for this plugin,
+run `agent login` and complete the sign-in in your browser. Cursor manages the
+credentials used by that context. The adapter's ACP authentication uses the
+existing vendor credentials. [Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication)
+
+The native executable version must match `cli-tree.json`. Its `executable_checks`
+apply before CLI calls and adapter execution.
 
 Provide Python 3.13 or newer. Computer MCP can resolve the declared `python-runtime`
 dependency for the packaged adapter. A direct standalone launch uses the adapter's

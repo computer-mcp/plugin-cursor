@@ -67,7 +67,17 @@ for line in sys.stdin:
     q=json.loads(line);method=q.get('method');identifier=q.get('id');params=q.get('params',{})
     if method=='initialize':
         reply(identifier,{'protocolVersion':1,'agentCapabilities':{'loadSession':True},'authMethods':[{'id':'cursor_login','name':'Existing CLI login'}]})
-    elif method=='authenticate':reply(identifier,{})
+    elif method=='authenticate':
+        rejection = os.environ.get('FIXTURE_AUTH_ERROR_CODE')
+        if rejection is None:
+            reply(identifier,{})
+        else:
+            assert params == {'methodId': 'cursor_login'}
+            observe('rejected_authentication')
+            emit({'jsonrpc': '2.0', 'id': identifier, 'error': {
+                'code': int(rejection), 'message': os.environ['FIXTURE_AUTH_ERROR_MESSAGE'],
+                'data': {'token': 'fixture-sensitive-data'},
+            }})
     elif method in ('session/new','session/load'):
         if os.environ.get('CURSOR_SOURCE_FIXTURE') == '1':
             with (Path(os.environ['HOME']) / 'cursor-native-starts.jsonl').open('a') as stream:

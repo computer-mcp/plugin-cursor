@@ -9,7 +9,6 @@ class DeclarationTests(unittest.TestCase):
     def test_manifest_matches_actual_catalog(self):
         manifest = tomllib.loads((ROOT / 'computer-mcp-plugin.toml').read_text())
         self.assertEqual(manifest['permissions'], [{'id': 'project', 'access': 'write', 'purpose': 'Open Cursor sessions and run requested project tasks and edits in owner-selected worktrees, including cancellation and native response delivery.'}])
-        self.assertNotIn('sandbox', manifest)
         self.assertNotIn('host_service_contract', manifest['mcp'][0])
         mcp = manifest['mcp'][0]
         self.assertEqual(mcp['requirements'], {'project': 'write'})
@@ -25,5 +24,14 @@ class DeclarationTests(unittest.TestCase):
             finally: client.close()
         self.assertEqual([c['id'] for c in manifest['cli']], ['agent'])
         self.assertEqual([c['id'] for c in manifest['skills']], ['cursor-agent'])
+
+    def test_sandbox_requests_only_official_agent_api_hosts(self):
+        sandbox = tomllib.loads((ROOT / 'computer-mcp-plugin.toml').read_text())['sandbox']
+        self.assertEqual(set(sandbox), {'network', 'purpose'})
+        self.assertTrue(sandbox['purpose'])
+        self.assertEqual(sandbox['network'], {
+            'level': 'custom', 'hosts': ['api2.cursor.sh', 'api5.cursor.sh'],
+            'include_trusted': False,
+        })
 
 if __name__ == '__main__': unittest.main()
