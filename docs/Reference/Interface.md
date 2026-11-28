@@ -29,11 +29,10 @@ hosts are excluded and Full access defaults to off.
 [Cursor ACP](https://cursor.com/docs/cli/acp) and
 [Cursor network configuration](https://cursor.com/docs/enterprise/network-configuration#ip-allowlisting)
 
-The owner initiates browser sign-in via `agent login` in the selected Cursor
-Agent context. The plugin network request covers only the agent/API hosts
-listed above. Provider HOME, cache and state use host-provisioned persistent
-container paths. Temporary storage is execution-local.
-[Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication)
+The installed provider uses host-provisioned persistent container paths for
+HOME, cache and state. Temporary storage is execution-local. See the
+[installation guide](Installation.md#dependencies-and-configuration) for sign-in
+requirements.
 
 The host selects the worktree, protects unrelated projects, host data and
 other containers, and retires writers before removal. This adapter does not
@@ -102,8 +101,9 @@ The adapter initializes ACP and calls `authenticate` with the advertised
 `cursor_login` method before creating or loading a session. An authentication
 RPC rejection stops setup. The adapter reports `authentication_required` for
 ACP Authentication Required (`-32000`) and `vendor_error` for other
-authentication rejections. Both include the original RPC code and a fixed
-login hint. [Cursor ACP](https://cursor.com/docs/cli/acp) ·
+authentication rejections. Both include the numeric RPC code and omit the
+vendor message and data. Only `authentication_required` includes a sign-in
+hint appropriate to installed or standalone use. [Cursor ACP](https://cursor.com/docs/cli/acp) ·
 [ACP error codes](https://agentclientprotocol.com/protocol/v1/schema#errorcode)
 
 ## Tools

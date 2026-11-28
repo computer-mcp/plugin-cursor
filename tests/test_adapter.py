@@ -47,7 +47,10 @@ class AdapterTests(unittest.TestCase):
                     error = Client.value(response)['error']
                     self.assertEqual(error['code'], expected)
                     self.assertIn(f'RPC code {rpc_code}', error['message'])
-                    self.assertIn('Run `agent login` in the same Cursor Agent context.', error['message'])
+                    if rpc_code == -32000:
+                        self.assertIn('Run `agent login` in the standalone Cursor Agent context.', error['message'])
+                    else:
+                        self.assertEqual(error['message'], f'Cursor rejected authenticate (RPC code {rpc_code}).')
                     self.assertNotIn('fixture-sensitive', json.dumps(response))
                     self.assertNotIn('https://example.test/', json.dumps(response))
                     self.assertEqual(self.value(client.call('cursor.acp.session.list'))['sessions'], [])

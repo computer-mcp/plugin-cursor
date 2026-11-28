@@ -29,10 +29,11 @@ REFUSAL = 'vendor_effect_denied'
 class VendorFixture:
     """Drive the adapter contract with a local socket and a deterministic ACP peer."""
 
-    def __init__(self, home, answer_error):
+    def __init__(self, home, answer_error, vendor_env=None):
         self.socket, self.adapter_socket = socket.socketpair()
         self.home = home
         self.answer_error = answer_error
+        self.vendor_env = {'HOME': str(home), 'CURSOR_SOURCE_FIXTURE': '1', **(vendor_env or {})}
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.vendor = None
         self.turn = None
@@ -74,7 +75,7 @@ class VendorFixture:
             self.launches += 1
             self.vendor = subprocess.Popen(
                 [sys.executable, str(PEER), 'acp'], cwd=self.home,
-                env={'HOME': str(self.home), 'CURSOR_SOURCE_FIXTURE': '1'},
+                env=self.vendor_env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         elif op == 'read':
             if self.vendor is None:
@@ -149,8 +150,8 @@ class ManagedAdapterTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
-    def managed(self, answer_error, *, transport=False):
-        host = VendorFixture(self.home, answer_error)
+    def managed(self, answer_error, *, transport=False, vendor_env=None):
+        host = VendorFixture(self.home, answer_error, vendor_env)
         self.addCleanup(host.close)
         fd = host.adapter_socket.fileno()
         bootstrap = (
@@ -273,6 +274,22 @@ class ManagedAdapterTests(unittest.TestCase):
         self.assertEqual((host.launches, host.retirements), (1, 1))
         self.assertFalse((control / 'launch-replayed.json').exists())
         self.assertFalse((self.home / 'cursor-native-starts.jsonl').exists())
+
+    def test_managed_authentication_required_stops_before_session_load(self):
+        client, host = self.managed(None, vendor_env={
+            'FIXTURE_AUTH_ERROR_CODE': '-32000',
+            'FIXTURE_AUTH_ERROR_MESSAGE': 'fixture-sensitive-message',
+        })
+        response = self.raw_call(client, 'session.open', {'resume_session_id': 'saved-conversation'})
+        self.assertTrue(response['result']['isError'])
+        self.assertEqual(Client.value(response)['error'], {
+            'code': 'authentication_required',
+            'message': 'Cursor sign-in required (RPC code -32000). Check sign-in for this installed Cursor provider.',
+        })
+        self.assertNotIn('fixture-sensitive', json.dumps(response))
+        self.assertFalse((self.home / 'cursor-native-starts.jsonl').exists())
+        self.assertEqual(host.launches, 1)
+        self.assertIsNone(host.vendor)
 
     def test_packaged_standalone_and_missing_managed_negotiation(self):
         environment = {'HOME': str(self.home), 'PATH': os.environ['PATH'], 'CURSOR_SOURCE_FIXTURE': '1'}

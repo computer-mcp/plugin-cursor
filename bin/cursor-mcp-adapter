@@ -295,10 +295,11 @@ class Session:
                         code = message['error']['code']
                         settled_rpc_error = kind == 'prompt' and self.managed is not None
                         if method == 'authenticate':
-                            hint = 'Run `agent login` in the same Cursor Agent context.'
                             if code == ACP_AUTH_REQUIRED:
+                                hint = ('Check sign-in for this installed Cursor provider.' if self.managed else
+                                        'Run `agent login` in the standalone Cursor Agent context.')
                                 raise Failure('authentication_required', f'Cursor sign-in required (RPC code {code}). {hint}')
-                            raise Failure('vendor_error', f'Cursor rejected authenticate (RPC code {code}). {hint}')
+                            raise Failure('vendor_error', f'Cursor rejected authenticate (RPC code {code}).')
                         raise Failure('vendor_error',f'Cursor rejected {method} (RPC code {code}); no request was replayed')
                     value = message['result']
                     if not isinstance(value,dict):

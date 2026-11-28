@@ -50,9 +50,9 @@ from `Examples/settings.json`.
 
 ## Install
 
-1. Install Cursor Agent and run `agent login` in the vendor context selected for
-   the plugin. Provide Python 3.13 or newer on the Computer MCP launch `PATH`.
-   [Cursor CLI authentication](https://cursor.com/docs/cli/reference/authentication)
+1. Install Cursor Agent separately. Provide Python 3.13 or newer on the Computer
+   MCP launch `PATH`. See the [installation guide](docs/Reference/Installation.md#dependencies-and-configuration)
+   for the sign-in requirements of installed and standalone use.
 2. Build the archive:
 
    ```sh
