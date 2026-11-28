@@ -29,28 +29,24 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.value(self.call('session.list'))['sessions'],[])
     def test_authentication_rejection_stops_before_native_session_setup(self):
         cases = [
-            (-32000, 'fixture-sensitive-message', 'authentication_required'),
+            (-32000, 'fixture-sensitive-message', 'authentication_required',
+             'Cursor sign-in required (RPC code -32000).'),
             (-32602, 'Failed to open browser for login. Please visit: https://example.test/fixture-sensitive-url',
-             'vendor_error'),
-            (-32603, 'fixture-sensitive-message', 'vendor_error'),
+             'vendor_error', 'Cursor rejected authenticate (RPC code -32602).'),
+            (-32603, 'fixture-sensitive-message', 'vendor_error',
+             'Cursor rejected authenticate (RPC code -32603).'),
         ]
-        for rpc_code, message, expected in cases:
-            with self.subTest(rpc_code=rpc_code, expected=expected), tempfile.TemporaryDirectory() as directory:
+        for rpc_code, vendor_message, code, message in cases:
+            with self.subTest(rpc_code=rpc_code), tempfile.TemporaryDirectory() as directory:
                 client = Client(directory, {
                     'HOME': directory, 'CURSOR_SOURCE_FIXTURE': '1',
                     'FIXTURE_AUTH_ERROR_CODE': str(rpc_code),
-                    'FIXTURE_AUTH_ERROR_MESSAGE': message,
+                    'FIXTURE_AUTH_ERROR_MESSAGE': vendor_message,
                 })
                 try:
                     response = client.call('cursor.acp.session.open')
                     self.assertTrue(response['result']['isError'])
-                    error = Client.value(response)['error']
-                    self.assertEqual(error['code'], expected)
-                    self.assertIn(f'RPC code {rpc_code}', error['message'])
-                    if rpc_code == -32000:
-                        self.assertIn('Run `agent login` in the standalone Cursor Agent context.', error['message'])
-                    else:
-                        self.assertEqual(error['message'], f'Cursor rejected authenticate (RPC code {rpc_code}).')
+                    self.assertEqual(Client.value(response)['error'], {'code': code, 'message': message})
                     self.assertNotIn('fixture-sensitive', json.dumps(response))
                     self.assertNotIn('https://example.test/', json.dumps(response))
                     self.assertEqual(self.value(client.call('cursor.acp.session.list'))['sessions'], [])

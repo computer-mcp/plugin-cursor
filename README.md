@@ -50,9 +50,8 @@ from `Examples/settings.json`.
 
 ## Install
 
-1. Install Cursor Agent separately. Provide Python 3.13 or newer on the Computer
-   MCP launch `PATH`. See the [installation guide](docs/Reference/Installation.md#dependencies-and-configuration)
-   for the sign-in requirements of installed and standalone use.
+1. Install Cursor Agent separately and sign in on your computer using Cursor.
+   Provide Python 3.13 or newer on the Computer MCP launch `PATH`.
 2. Build the archive:
 
    ```sh
@@ -97,8 +96,7 @@ semantics.
 ## Requirements
 
 - Computer MCP on an arm64 computer.
-- Cursor Agent (`agent`), installed and authenticated separately; its version must match
-  `cli-tree.json`.
+- Cursor Agent (`agent`) at the version declared in `cli-tree.json`.
 - Python 3.13 or newer.
 
 ## Documentation

@@ -284,7 +284,7 @@ class ManagedAdapterTests(unittest.TestCase):
         self.assertTrue(response['result']['isError'])
         self.assertEqual(Client.value(response)['error'], {
             'code': 'authentication_required',
-            'message': 'Cursor sign-in required (RPC code -32000). Check sign-in for this installed Cursor provider.',
+            'message': 'Cursor sign-in required (RPC code -32000).',
         })
         self.assertNotIn('fixture-sensitive', json.dumps(response))
         self.assertFalse((self.home / 'cursor-native-starts.jsonl').exists())

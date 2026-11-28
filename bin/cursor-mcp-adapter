@@ -296,9 +296,7 @@ class Session:
                         settled_rpc_error = kind == 'prompt' and self.managed is not None
                         if method == 'authenticate':
                             if code == ACP_AUTH_REQUIRED:
-                                hint = ('Check sign-in for this installed Cursor provider.' if self.managed else
-                                        'Run `agent login` in the standalone Cursor Agent context.')
-                                raise Failure('authentication_required', f'Cursor sign-in required (RPC code {code}). {hint}')
+                                raise Failure('authentication_required', f'Cursor sign-in required (RPC code {code}).')
                             raise Failure('vendor_error', f'Cursor rejected authenticate (RPC code {code}).')
                         raise Failure('vendor_error',f'Cursor rejected {method} (RPC code {code}); no request was replayed')
                     value = message['result']
@@ -581,7 +579,7 @@ class Cursor:
     def tools(self):
         return [
             Tool('cursor.acp.prompt','Run one Cursor ACP prompt and retire its owned process. Use explicit sessions for interactive input.',schema({**OPEN_FIELDS,**PROMPT_FIELDS},['prompt']),self.once,risk='full-shell'),
-            Tool('cursor.acp.session.open','Initialize Cursor ACP, authenticate existing vendor credentials, and create or load a session in the host-selected working directory.',schema(OPEN_FIELDS),self.open,risk='full-shell'),
+            Tool('cursor.acp.session.open','Initialize Cursor ACP and create or load a session in the host-selected working directory.',schema(OPEN_FIELDS),self.open,risk='full-shell'),
             Tool('cursor.acp.session.prompt','Prompt an existing Cursor ACP session; read events and answer pending requests concurrently.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.prompt,risk='full-shell',continuation=('cursor.session','session')),
             Tool('cursor.acp.session.prompt.start','Start a prompt without holding a long MCP request; use its prompt ID to read completion.',schema({'session':SESSION,**PROMPT_FIELDS},['session','prompt']),self.start_prompt,risk='full-shell',continuation=('cursor.session','session')),
             Tool('cursor.acp.session.prompt.result','Read the most recent background prompt result without replaying it.',schema({'session':SESSION,'prompt_id':text_schema(64)},['session','prompt_id']),self.prompt_result,risk='read-only',continuation=('cursor.session','session')),

@@ -30,9 +30,7 @@ hosts are excluded and Full access defaults to off.
 [Cursor network configuration](https://cursor.com/docs/enterprise/network-configuration#ip-allowlisting)
 
 The installed provider uses host-provisioned persistent container paths for
-HOME, cache and state. Temporary storage is execution-local. See the
-[installation guide](Installation.md#dependencies-and-configuration) for sign-in
-requirements.
+HOME, cache and state. Temporary storage is execution-local.
 
 The host selects the worktree, protects unrelated projects, host data and
 other containers, and retires writers before removal. This adapter does not
@@ -98,12 +96,11 @@ stdio clients use the local supervisor and select the executable through
 `--executable`, `CURSOR_AGENT_EXECUTABLE`, or PATH.
 
 The adapter initializes ACP and calls `authenticate` with the advertised
-`cursor_login` method before creating or loading a session. An authentication
-RPC rejection stops setup. The adapter reports `authentication_required` for
-ACP Authentication Required (`-32000`) and `vendor_error` for other
-authentication rejections. Both include the numeric RPC code and omit the
-vendor message and data. Only `authentication_required` includes a sign-in
-hint appropriate to installed or standalone use. [Cursor ACP](https://cursor.com/docs/cli/acp) ·
+`cursor_login` method so Cursor Agent can use its existing sign-in before the
+adapter creates or loads a session. An authentication RPC rejection stops setup.
+The adapter reports `authentication_required` for ACP Authentication Required
+(`-32000`) and `vendor_error` for other authentication rejections. Both include
+the numeric RPC code and omit the vendor message and data. [Cursor ACP](https://cursor.com/docs/cli/acp) ·
 [ACP error codes](https://agentclientprotocol.com/protocol/v1/schema#errorcode)
 
 ## Tools
