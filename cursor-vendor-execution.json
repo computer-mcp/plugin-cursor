@@ -1,0 +1,25 @@
+{
+  "capability": "io.github.computer-mcp/vendor-execution-v1",
+  "dependency": "cursor-agent",
+  "tools": {
+    "cursor.acp.prompt": "acquire",
+    "cursor.acp.session.open": "acquire",
+    "cursor.acp.session.prompt": "prompt",
+    "cursor.acp.session.prompt.start": "detached_prompt",
+    "cursor.acp.session.prompt.result": "observe",
+    "cursor.acp.session.list": "observe",
+    "cursor.acp.session.mode": "mode",
+    "cursor.acp.session.cancel": "stop",
+    "cursor.acp.session.close": "close",
+    "cursor.acp.events.read": "observe",
+    "cursor.acp.requests.list": "observe",
+    "cursor.acp.requests.respond": "answer"
+  },
+  "probe": [
+    "--version"
+  ],
+  "workload": [
+    "acp"
+  ],
+  "version_stdout": "2026.05.04-08e5280\n"
+}

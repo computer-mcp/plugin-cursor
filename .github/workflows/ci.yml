@@ -53,9 +53,62 @@ jobs:
       - run: python3 tests/check_runtime_rejection.py
   runtime:
     uses: computer-mcp/github-workflows/.github/workflows/plugin-runtime.yml@fd25fcface41732fda099017c6945912366fc7c1
+  host-consumer:
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [source, vendor-stop]
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.14'
+      - name: Verify the consumer against pinned Host source
+        shell: bash
+        env:
+          PLUGIN_SHA: ${{ github.sha }}
+          SUITE: ${{ matrix.suite }}
+          GIT_TERMINAL_PROMPT: '0'
+          GIT_ASKPASS: /usr/bin/false
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_ALLOW_PROTOCOL: file:https
+        run: |
+          host_sha=$(cat .github/computer-mcp-host.sha)
+          [[ "$host_sha" =~ ^[0-9a-f]{40}$ && "$host_sha" != 0000000000000000000000000000000000000000 ]]
+          test "$(git rev-parse HEAD)" = "$PLUGIN_SHA"
+          host_source="$RUNNER_TEMP/computer-mcp-host"
+          git init "$host_source"
+          git -C "$host_source" -c credential.helper= fetch --no-tags --depth=1 \
+            https://github.com/computer-mcp/computer-mcp.git "$host_sha"
+          git -C "$host_source" checkout --detach "$host_sha"
+          test "$(git -C "$host_source" rev-parse HEAD)" = "$host_sha"
+          python3 -B scripts/validate_host_source.py --suite "$SUITE" \
+            --host-source "$host_source" --host-sha "$host_sha" \
+            --plugin-source "$PWD" --plugin-sha "$PLUGIN_SHA" \
+            --output "$RUNNER_TEMP/host-consumer" --timeout 1200
+      - name: Retain consumer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cursor-host-consumer-${{ matrix.suite }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/host-consumer/receipt.json
+            ${{ runner.temp }}/host-consumer/cases.json
+            ${{ runner.temp }}/host-consumer/host-source-export.log
+            ${{ runner.temp }}/host-consumer/plugin-source-export.log
+            ${{ runner.temp }}/host-consumer/package-build.log
+            ${{ runner.temp }}/host-consumer/swift-test.log
+          if-no-files-found: ignore
+          retention-days: 14
   validate:
     if: always()
-    needs: [package, unsupported-runtime, runtime]
+    needs: [package, unsupported-runtime, runtime, host-consumer]
     uses: computer-mcp/github-workflows/.github/workflows/result.yml@fd25fcface41732fda099017c6945912366fc7c1
     with:
       needs-json: ${{ toJSON(needs) }}

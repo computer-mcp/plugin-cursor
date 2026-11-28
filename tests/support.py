@@ -12,15 +12,15 @@ ROOT = Path(__file__).resolve().parent.parent
 VENDOR = tomllib.loads((ROOT / 'computer-mcp-plugin.toml').read_text())['id']
 
 class Client:
-    def __init__(self, directory, environment=None, command=None):
+    def __init__(self, directory, environment=None, command=None, pass_fds=()):
         env = dict(os.environ) if command is None else {}
         env.update(environment or {})
         env['CURSOR_AGENT_EXECUTABLE' if VENDOR=='cursor' else 'CLAUDE_CODE_EXECUTABLE'] = str(ROOT/'tests/Fixtures/vendor.py')
-        self.process = subprocess.Popen(command or [sys.executable,str(ROOT/f'bin/{VENDOR}-mcp-adapter')],cwd=directory,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.process = subprocess.Popen(command or [sys.executable,str(ROOT/f'bin/{VENDOR}-mcp-adapter')],cwd=directory,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=pass_fds)
         self.buffer = bytearray()
         self.serial = 1
         self.saved = {}
-        self.request('initialize',{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}})
+        self.initialization = self.request('initialize',{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'fixture','version':'1'}})
         self.send({'jsonrpc':'2.0','method':'notifications/initialized'})
     def send(self, value):
         self.process.stdin.write(json.dumps(value).encode()+b'\n');self.process.stdin.flush()

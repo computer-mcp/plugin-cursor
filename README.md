@@ -34,7 +34,7 @@ vendor behavior needs no host release.
 The CLI contribution describes verified non-interactive commands; the native baseline and its
 exact version assertion live in `cli-tree.json`. It is deliberately partial: interactive setup,
 installation and unsupported administrative flows are not callable tools. The adapter owns
-streaming and session and run state. The host owns registration, profile grants, the initial
+streaming and session and run state. The host owns registration, provider/caller grants, private containers, the initial
 working directory and audit.
 
 ## Quick look
@@ -50,8 +50,8 @@ from `Examples/settings.json`.
 
 ## Install
 
-1. Install and authenticate Cursor Agent yourself, and provide Python 3.13 or newer on the
-   Computer MCP launch `PATH`. The plugin installs neither and never copies credentials.
+1. Install Cursor Agent separately and sign in on your computer using Cursor.
+   Provide Python 3.13 or newer on the Computer MCP launch `PATH`.
 2. Build the archive:
 
    ```sh
@@ -61,9 +61,13 @@ from `Examples/settings.json`.
 3. Install the ZIP through Computer MCP's plugin UI or the owner CLI. Installation is neither
    activation nor a permission grant.
 4. Review `Examples/settings.json`, replace its placeholder paths, and configure the plugin
-   through the same UI or `plugins configure`. The CLI dependency binding selects the executable
-   for the CLI contribution; the MCP launch `args` supply `--executable` for the adapter. Point
-   both at the same verified installation.
+   through the same UI or `plugins configure`. The `cursor-agent` dependency selects the
+   executable for the CLI and Host-managed ACP contributions.
+
+At enablement, review the provider Project-write request, MCP caller requirements
+and sandbox network request. The request covers `api2.cursor.sh` and
+`api5.cursor.sh`. The owner can narrow it, and Host policy still applies.
+Sandbox execution is the default.
 
 See the [installation guide](docs/Reference/Installation.md) for revisions, configuration
 publication and validation.
@@ -92,8 +96,7 @@ semantics.
 ## Requirements
 
 - Computer MCP on an arm64 computer.
-- Cursor Agent (`agent`), installed and authenticated separately; its version must match
-  `cli-tree.json`.
+- Cursor Agent (`agent`) at the version declared in `cli-tree.json`.
 - Python 3.13 or newer.
 
 ## Documentation
@@ -106,7 +109,10 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 scripts/validate_native.py --executable /absolute/path/to/agent
 ```
 
-Tests use deterministic peers, not a model. Authenticated execution and production activation are
+The [source consumer](docs/Reference/Installation.md#deterministic-source-consumer)
+takes explicit clean full-SHA host/plugin inputs and exercises all three contributions
+with isolated host-owned state. Its native host execution and the final host pin remain
+integration acceptance steps. Tests use deterministic peers, not a model. Authenticated execution and production activation are
 separate acceptance steps.
 
 ## Contributing

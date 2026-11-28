@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -26,6 +27,35 @@ class AdapterTests(unittest.TestCase):
         r=self.value(self.call('prompt',{'prompt':'hello'}))
         self.assertEqual(r['text'],'hello');self.assertEqual(r['stop_reason'],'end_turn')
         self.assertEqual(self.value(self.call('session.list'))['sessions'],[])
+    def test_authentication_rejection_stops_before_native_session_setup(self):
+        cases = [
+            (-32000, 'fixture-sensitive-message', 'authentication_required',
+             'Cursor sign-in required (RPC code -32000).'),
+            (-32602, 'Failed to open browser for login. Please visit: https://example.test/fixture-sensitive-url',
+             'vendor_error', 'Cursor rejected authenticate (RPC code -32602).'),
+            (-32603, 'fixture-sensitive-message', 'vendor_error',
+             'Cursor rejected authenticate (RPC code -32603).'),
+        ]
+        for rpc_code, vendor_message, code, message in cases:
+            with self.subTest(rpc_code=rpc_code), tempfile.TemporaryDirectory() as directory:
+                client = Client(directory, {
+                    'HOME': directory, 'CURSOR_SOURCE_FIXTURE': '1',
+                    'FIXTURE_AUTH_ERROR_CODE': str(rpc_code),
+                    'FIXTURE_AUTH_ERROR_MESSAGE': vendor_message,
+                })
+                try:
+                    response = client.call('cursor.acp.session.open')
+                    self.assertTrue(response['result']['isError'])
+                    self.assertEqual(Client.value(response)['error'], {'code': code, 'message': message})
+                    self.assertNotIn('fixture-sensitive', json.dumps(response))
+                    self.assertNotIn('https://example.test/', json.dumps(response))
+                    self.assertEqual(self.value(client.call('cursor.acp.session.list'))['sessions'], [])
+                finally:
+                    client.close()
+                effects = (Path(directory) / 'cursor-vendor-effects.jsonl').read_text().splitlines()
+                self.assertEqual([json.loads(line)['phase'] for line in effects],
+                                 ['probe', 'workload', 'rejected_authentication'])
+                self.assertFalse((Path(directory) / 'cursor-native-starts.jsonl').exists())
     def test_reuse_session_and_explicit_native_resume(self):
         session=self.open(resume_session_id='saved-conversation',mode='plan')
         for prompt in ['first','second']:
@@ -62,16 +92,78 @@ class AdapterTests(unittest.TestCase):
         self.interactive('question',{'outcome':{'outcome':'answered','answers':[{'questionId':'q1','selectedOptionIds':['a']}]}})
     def test_plan_response(self):
         self.interactive('plan',{'outcome':{'outcome':'accepted'}})
-    def test_native_cancel_settles_prompt_and_session_can_be_reused(self):
-        session=self.open()
-        request=self.client.begin('cursor.acp.session.prompt',{'session':session,'prompt':'slow'})
+    def begin_cancel_case(self, session, prompt):
+        request = self.client.begin('cursor.acp.session.prompt', {
+            'session': session, 'prompt': prompt, 'timeout_seconds': 10,
+        })
         for _ in range(80):
-            page=self.value(self.call('events.read',{'session':session}))
-            if page['events']:break
+            page = self.value(self.call('events.read', {'session': session}))
+            if page['events']:
+                return request
             time.sleep(.02)
-        self.value(self.call('session.cancel',{'session':session}))
-        self.assertEqual(Client.value(self.client.wait(request))['stop_reason'],'cancelled')
-        self.value(self.call('session.prompt',{'session':session,'prompt':'after-cancel'}))
+        self.fail('Native prompt did not start')
+
+    def cancel_and_wait(self, session, request):
+        self.assertEqual(self.value(self.call('session.cancel', {'session': session})),
+                         {'cancel_requested': True, 'session': session})
+        return self.client.wait(request, timeout=5)
+
+    def test_native_cancel_settles_prompt_and_session_can_be_reused(self):
+        session = self.open(resume_session_id='cancel-target')
+        request = self.begin_cancel_case(session, 'slow')
+        response = self.cancel_and_wait(session, request)
+        self.assertTrue(response['result']['isError'])
+        result = Client.value(response)
+        self.assertEqual(result['stop_reason'], 'cancelled')
+        self.assertTrue(result['is_error'])
+        self.assertEqual(result['native_result'], {
+            'stopReason': 'cancelled', 'usage': {'tokens': 3}, '_meta': {'fixture': 'settled'},
+        })
+        reused = self.value(self.call('session.prompt', {'session': session, 'prompt': 'after-cancel'}))
+        self.assertEqual(reused['session_id'], 'cancel-target')
+        self.assertEqual(reused['stop_reason'], 'end_turn')
+
+    def test_native_completion_can_win_cancellation_without_affecting_sibling(self):
+        target = self.open(resume_session_id='cancel-target')
+        sibling = self.open(resume_session_id='unrelated-sibling', permission_policy='manual')
+        sibling_request = self.client.begin('cursor.acp.session.prompt', {
+            'session': sibling, 'prompt': 'permission', 'timeout_seconds': 15,
+        })
+        pending = self.pending(sibling)
+        target_request = self.begin_cancel_case(target, 'complete-on-cancel')
+        result = self.value(self.cancel_and_wait(target, target_request))
+        self.assertEqual(result['stop_reason'], 'end_turn')
+        self.assertFalse(result['is_error'])
+        self.assertEqual(result['native_result'], {
+            'stopReason': 'end_turn', 'usage': {'tokens': 7}, '_meta': {'fixture': 'completed'},
+        })
+        self.assertEqual(self.value(self.call('requests.list', {'session': sibling}))['requests'],
+                         [pending])
+        self.value(self.call('requests.respond', {
+            'session': sibling, 'request_id': pending['request_id'],
+            'response': {'outcome': {'outcome': 'selected', 'optionId': 'opaque-yes'}},
+        }))
+        sibling_result = self.value(self.client.wait(sibling_request, timeout=5))
+        self.assertEqual(sibling_result['session_id'], 'unrelated-sibling')
+        self.assertEqual(sibling_result['stop_reason'], 'end_turn')
+        self.assertIn('opaque-yes', sibling_result['text'])
+
+    def test_cancel_preserves_native_error_and_result_validation(self):
+        for prompt, code, detail in [
+            ('error-on-cancel', 'vendor_error', '-32023'),
+            ('invalid-result-on-cancel', 'invalid_vendor_response', 'must be an object'),
+            ('missing-stop-on-cancel', 'invalid_vendor_response', 'lacks a stop reason'),
+        ]:
+            with self.subTest(prompt=prompt):
+                session = self.open()
+                request = self.begin_cancel_case(session, prompt)
+                response = self.cancel_and_wait(session, request)
+                self.assertTrue(response['result']['isError'])
+                error = Client.value(response)['error']
+                self.assertEqual(error['code'], code)
+                self.assertIn(detail, error['message'])
+                closed = self.call('session.prompt', {'session': session, 'prompt': 'after'})
+                self.assertEqual(Client.value(closed)['error']['code'], 'session_closed')
     def test_unsettled_native_cancellation_retires_owned_session(self):
         session=self.open()
         request=self.client.begin('cursor.acp.session.prompt',{'session':session,'prompt':'ignore-cancel'})

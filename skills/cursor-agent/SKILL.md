@@ -15,4 +15,4 @@ The default permission policy is reject-once. Choose manual when approvals must 
 
 `completed: true` is settlement, not necessarily success. Inspect is_error, stop_reason, native_result, truncation and missed-event markers. Use session.cancel to cancel active work and session.close when finished. After adapter replacement, old handles are invalid; use an explicit saved native conversation ID with resume_session_id only when continuation is intended.
 
-Vendor installation, authentication, updates and account setup remain local user operations. Host grants and Cursor permissions are distinct. A working directory is not a sandbox. Protocol fixtures, native initialization and real model execution are different verification claims.
+The owner signs in on their computer using Cursor. If session setup returns `authentication_required`, report Cursor Agent's rejection to the owner. Vendor installation, updates and account setup remain local user operations. Host grants and Cursor permissions are distinct. A working directory is not a sandbox. Protocol fixtures, native initialization and real model execution are different verification claims.

@@ -19,6 +19,7 @@ INCLUDE = (
     *README_ASSETS,
     "computer-mcp-plugin.toml",
     "cli-tree.json",
+    "cursor-vendor-execution.json",
     "bin",
     "skills",
     "README.md",
